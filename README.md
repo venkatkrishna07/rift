@@ -1,134 +1,109 @@
+<div align="center">
+
 # rift
 
-A self-hosted tunnel server. Expose any local HTTP service or TCP port to the internet over a single QUIC connection — using infrastructure you control.
+**A self-hosted tunnel for local development. One binary, one VPS, no accounts.**
+
+Expose localhost to the internet over a single QUIC connection — on infrastructure you fully own. Built for sharing dev servers, testing webhooks, and demoing work in progress.
+
+[![Go Version](https://img.shields.io/badge/go-1.22+-00ADD8?logo=go)](https://go.dev)
+[![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+
+</div>
 
 ```
-localhost:3000  ──── QUIC ────▶  https://myapp.tunnel.example.com
-localhost:5432  ──── QUIC ────▶  tunnel.example.com:10247
+  localhost:3000  ──── QUIC ────▶  https://myapp.tunnel.example.com
+  localhost:5432  ──── QUIC ────▶  tunnel.example.com:10247
 ```
 
----
+```bash
+rift client --server tunnel.example.com --expose 3000:http:myapp
+# → tunnel ready  https://myapp.tunnel.example.com
+```
 
-If you've used **ngrok**, **Cloudflare Tunnel**, or **localtunnel**, rift does the same thing — except the server is yours. Your traffic doesn't pass through anyone else's infrastructure. There are no accounts, no dashboards, no monthly limits, and nothing phoning home.
-
-The tradeoff: you need a VPS or a cloud VM to run the server side.
-
----
-
-## Contents
-
-- [Quick start](#quick-start)
-- [How it works](#how-it-works)
-- [Compared to alternatives](#compared-to-alternatives)
-- [Production setup](#production-setup)
-- [Token management](#token-management)
-- [Client usage](#client-usage)
-- [TCP tunnels](#tcp-tunnels)
-- [WebSocket support](#websocket-support)
-- [CLI reference](#cli-reference)
-- [Building from source](#building-from-source)
+That's it. Your local dev server is now reachable on the internet, over HTTPS, through a server you run.
 
 ---
 
-## Quick start
+## Where rift fits
 
-Dev mode spins up with a self-signed certificate and no authentication. Good for local testing.
+Self-hosted tunnels already exist — [frp](https://github.com/fatedier/frp), [bore](https://github.com/ekzhang/bore), [chisel](https://github.com/jpillora/chisel). They all ride on TCP. rift is the same idea, but built on QUIC, which gives you three things you can't get over TCP:
 
-**Server**
+- **No head-of-line blocking between tunnels.** On TCP, a lost packet on one multiplexed stream stalls every other stream on the same connection until it's retransmitted. QUIC isolates streams, so a hiccup on your API tunnel doesn't freeze your database tunnel.
+- **Connection migration.** Switch from Wi-Fi to a hotspot, toggle your VPN, change networks mid-session — the QUIC connection survives without reconnecting or re-authenticating.
+- **TLS 1.3 is part of the handshake**, not layered on top. Encrypted from the first byte, in fewer round trips.
+
+If your network blocks UDP/443 (some corporate and café networks do), TCP-based tools will punch through more reliably. Otherwise QUIC is a cleaner foundation for what tunnels actually do.
+
+## Feature comparison
+
+| | **rift** | ngrok | cloudflared | frp | bore |
+|---|:---:|:---:|:---:|:---:|:---:|
+| Self-hosted | ✅ | ❌ | ❌ | ✅ | ✅ |
+| No account required | ✅ | ❌ | ❌¹ | ✅ | ✅ |
+| Transport | QUIC | HTTP/2 | QUIC | TCP | TCP |
+| HTTP + subdomains | ✅ | ✅² | ✅ | ✅ | ❌ |
+| TCP tunnels | ✅ | ✅ | ✅ | ✅ | ✅ |
+| UDP tunnels | ⏳³ | ❌ | ❌ | ✅ | ❌ |
+| WebSockets | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Auto TLS (Let's Encrypt) | ✅ | managed | managed | manual | ❌ |
+| Open source | ✅ | ❌ | ✅ | ✅ | ✅ |
+
+<sub>¹ Cloudflare Tunnel requires a Cloudflare account and a domain added to Cloudflare DNS .</sub>
+<br>
+<sub>² ngrok's free tier gives you one random `*.ngrok-free.app` subdomain. Persistent and custom subdomains are on paid plans </sub>
+<br>
+<sub>³ UDP tunnels are on the [roadmap](#roadmap)</sub>
+
+## Quick start (local)
+
+**Terminal 1 — server**
 ```bash
 rift server --dev --listen :4443
 ```
 
-**Client** (different terminal or machine)
+**Terminal 2 — client**
 ```bash
-# HTTP tunnel — gets a random public subdomain
-rift client --server localhost:4443 --insecure --expose 3000:http
-
-# Named subdomain
 rift client --server localhost:4443 --insecure --expose 3000:http:myapp
-
-# Raw TCP (database, SSH, anything)
-rift client --server localhost:4443 --insecure --expose 5432:tcp
+# → https://myapp.tunnel.localhost
 ```
 
-Once registered, the client prints where the tunnel is available:
-
-```
-{"msg":"tunnel ready","proto":"http","url":"https://myapp.tunnel.localhost","local_port":3000}
-{"msg":"tunnel ready","proto":"tcp","remote_addr":"tunnel.localhost:10001","local_port":5432}
-```
-
----
+To go public, swap `--dev` for a real domain and move the server to a VPS. See [Setup](#setup).
 
 ## How it works
 
 ```
-visitor ──HTTPS──▶ rift server (your VPS) ──QUIC stream──▶ rift client ──TCP──▶ localhost:PORT
+  visitor ──HTTPS──▶  rift server  ──QUIC stream──▶  rift client  ──TCP──▶  localhost
+           (your domain)   (your VPS)                   (your laptop)       (your app)
 ```
 
-1. The client dials your server over QUIC and authenticates with a token.
-2. It registers each `--expose` flag — the server assigns a subdomain (HTTP) or port (TCP).
-3. When a visitor hits the public URL, the server opens a new QUIC stream to the waiting client and relays the request.
-4. The client forwards it to the local service and relays the response back.
+1. Client dials the server over QUIC and authenticates with a token.
+2. Each `--expose` flag registers a tunnel — the server assigns a subdomain (HTTP) or a port (TCP).
+3. A visitor hits the public URL. The server opens a new QUIC stream to the client, which forwards the request to the local service.
+4. Response flows back along the same path.
 
-**Why QUIC?**
-One connection carries all tunnels with no head-of-line blocking. If your laptop switches networks, the connection migrates silently. Reconnects are fast. Auth tokens are never sent in 0-RTT data to prevent replay attacks.
+One QUIC connection carries every tunnel, with no head-of-line blocking between them. Auth tokens are never sent in 0-RTT data, to prevent replay attacks.
 
----
+## Setup
 
-## Compared to alternatives
+To use rift beyond `--dev` mode on your laptop, you'll need somewhere public for the server to live.
 
-Most tunnel tools in this space — ngrok, Cloudflare Tunnel, Tailscale Funnel, localtunnel — route your traffic through servers they operate. That works well and is often the right choice. Rift is for the cases where it isn't.
+**What you need:**
+- A VPS with a public IP (DigitalOcean, Hetzner, Linode, Fly.io, anything).
+- A domain name.
+- A wildcard DNS record: `*.tunnel.example.com → <your-server-ip>` (required for HTTP subdomain routing).
+- Ports 80 and 443 open, plus a TCP range if you want TCP tunnels.
 
-| | rift | ngrok | Cloudflare Tunnel | frp |
-|---|---|---|---|---|
-| Self-hosted | ✓ | ✗ | ✗ | ✓ |
-| Transport | QUIC | HTTP/2 + TLS | QUIC (MASQUE) | TCP |
-| HTTP tunnels | ✓ | ✓ | ✓ | ✓ |
-| TCP tunnels | ✓ | paid | ✗ | ✓ |
-| TLS termination | automatic (ACME) | managed | managed | manual |
-| Account required | ✗ | ✓ | ✓ | ✗ |
-| Token auth | ✓ | ✓ | ✓ | ✓ |
-| WebSocket support | ✓ | ✓ | ✓ | ✓ |
-| Open source | ✓ | partially | ✗ | ✓ |
-
-> This table reflects publicly documented behaviour and is best-effort. Features change.
-
-### Why QUIC matters for tunnels
-
-Most tunnel tools layer their multiplexing on top of TCP. TCP has a fundamental limitation here: a single lost packet stalls every stream sharing the connection until it's retransmitted — head-of-line blocking. For tunnels carrying multiple services over one connection, this means a blip in one service can introduce latency in all the others.
-
-QUIC is built on UDP and handles each stream independently. A dropped packet only stalls the stream it belongs to. The rest keep moving.
-
-A few other things QUIC gets right for this use case:
-
-- **Connection migration.** If your laptop changes IP (switching from Wi-Fi to a hotspot, or a VPN toggling), the QUIC connection continues without renegotiation. TCP would require a full reconnect.
-- **Built-in TLS 1.3.** The encryption handshake is part of the transport layer, not layered on top of it — so the connection is encrypted from the first byte.
-- **0-RTT resumption.** Reconnects are fast. Rift intentionally sends auth frames only after the full 1-RTT handshake to avoid replaying tokens in 0-RTT data.
-
-frp is a popular self-hosted alternative with a larger feature set. Its tunnel connections run over TCP, which is simpler to operate in constrained network environments (some firewalls block UDP). If UDP/443 is a problem on your network, frp may suit you better. If it isn't, QUIC gives you a cleaner multiplexing model.
-
----
-
-## Production setup
-
-### What you need
-
-- A server with a public IP (any VPS — DigitalOcean, Hetzner, Linode, etc.)
-- A domain name
-- A wildcard DNS record: `*.tunnel.example.com → your-server-ip`
-  (required for HTTP subdomain routing)
-- Ports `80` and `443` open, plus whatever TCP port range you want for TCP tunnels
-
-### TLS
-
-**Automatic (Let's Encrypt)** — the default. Rift handles ACME HTTP-01 challenges and caches certificates automatically.
+**Automatic TLS** via Let's Encrypt (default):
 
 ```bash
-rift server --domain tunnel.example.com --db /var/lib/rift/db
+rift server \
+  --domain tunnel.example.com \
+  --db /var/lib/rift/db \
+  --admin-secret "$RIFT_ADMIN_SECRET"
 ```
 
-**Pre-provisioned certificate** — if you already have a wildcard cert:
+**Pre-provisioned certificate** (if you already have a wildcard cert):
 
 ```bash
 rift server \
@@ -137,132 +112,62 @@ rift server \
   --key  /path/to/privkey.pem
 ```
 
-### Running as a service
+Systemd unit example in [docs/systemd.md](docs/systemd.md).
 
-Any process supervisor works. Example with systemd:
+## Tokens
 
-```ini
-[Unit]
-Description=rift tunnel server
-After=network-online.target
+Clients authenticate with tokens. Default TTL is 1 hour — the connected client is disconnected when its token expires.
 
-[Service]
-ExecStart=/usr/local/bin/rift server \
-  --domain tunnel.example.com \
-  --db /var/lib/rift/db \
-  --admin-secret ${RIFT_ADMIN_SECRET}
-EnvironmentFile=/etc/rift/env
-Restart=on-failure
-
-[Install]
-WantedBy=multi-user.target
-```
-
----
-
-## Token management
-
-Clients authenticate with tokens. Tokens have a default TTL of 1 hour and expire automatically — the connected client is disconnected when its token expires.
-
-### Provisioning tokens
-
-**While the server is stopped** (accesses the DB directly):
-
+**Offline** (server stopped, direct DB access):
 ```bash
 rift server --db /var/lib/rift/db --add-token alice
-# Token for "alice":
-# rift_4a7f...
+# → rift_4a7f...
 ```
 
-**While the server is running** (via the admin HTTP API):
-
+**Online** via the loopback-only admin API:
 ```bash
-# Set a secret — keep it in an env file or secrets manager
-export RIFT_ADMIN_SECRET=$(openssl rand -hex 32)
-
-# Start server with the secret
-rift server --domain tunnel.example.com --admin-secret "$RIFT_ADMIN_SECRET"
-
-# Provision a token from the same host
 curl -s -X POST \
   -H "Authorization: Bearer $RIFT_ADMIN_SECRET" \
-  "http://localhost/_admin/tokens?name=alice"
-# → {"name":"alice","token":"rift_4a7f...","ttl":"1h0m0s"}
+  "http://localhost/_admin/tokens?name=alice&ttl=168h"
+# → {"name":"alice","token":"rift_4a7f...","ttl":"168h0m0s"}
 ```
 
-Custom TTL or no expiry:
+The admin endpoint only binds to `127.0.0.1` and `::1`, and rate-limits at 5 req/min/IP. To provision from elsewhere, SSH in first.
 
+For tokens that never expire, start the server with `--token-ttl 0`.
+
+## Client
+
+**Multiple tunnels over one connection:**
 ```bash
-# 7-day token
-curl ... "http://localhost/_admin/tokens?name=ci-runner&ttl=168h"
-
-# Token that never expires (start server with --token-ttl 0)
-rift server --domain tunnel.example.com --token-ttl 0
-```
-
-> The `/_admin/tokens` endpoint is only reachable from loopback (`127.0.0.1`, `::1`). It accepts at most 5 requests per minute per IP.
-
----
-
-## Client usage
-
-### Multiple tunnels in one connection
-
-```bash
-rift client \
-  --server tunnel.example.com \
-  --token rift_4a7f... \
+rift client --server tunnel.example.com --token rift_... \
   --expose 3000:http:frontend \
   --expose 4000:http:api \
   --expose 5432:tcp
 ```
 
-### Token persistence
+**Persistent tokens.** After the first run, the token is cached in `~/.local/share/rift` and picked up automatically on subsequent connections to the same server.
 
-After the first run, the token is saved locally (`~/.local/share/rift`). Subsequent connections to the same server pick it up automatically:
-
-```bash
-# First run — provide the token
-rift client --server tunnel.example.com --token rift_4a7f... --expose 3000:http
-
-# Later — token loaded automatically
-rift client --server tunnel.example.com --expose 3000:http
-```
-
-### Reconnection
-
-The client reconnects automatically after transient failures using exponential backoff (1 s → 2 s → … → 30 s cap). On permanent errors — invalid token, expired token, IP blocked — it exits immediately without retrying.
-
----
+**Reconnection.** Exponential backoff from 1s up to 30s. Permanent errors (invalid token, expired token, blocked IP) exit immediately instead of looping.
 
 ## TCP tunnels
 
-TCP tunnels proxy raw bytes. The server allocates a port and accepts connections at `<domain>:<port>`.
-
 ```bash
-rift client --server tunnel.example.com --token rift_... --expose 5432:tcp
-# tunnel ready  remote_addr=tunnel.example.com:10003  local_port=5432
+rift client --server tunnel.example.com --expose 5432:tcp
+# → tunnel.example.com:10003
 
 psql -h tunnel.example.com -p 10003 -U postgres mydb
 ```
 
-The server's TCP port range is configurable:
+The server's TCP port range is configurable via `--tcp-port-min` and `--tcp-port-max`.
 
-```bash
-rift server --domain tunnel.example.com --tcp-port-min 10000 --tcp-port-max 10010
-```
+> TCP tunnels relay raw bytes — there's no visitor authentication at the tunnel layer. Use your application's own auth or restrict access at the firewall.
 
-> TCP tunnels carry raw bytes — there is no visitor authentication at the tunnel layer. For anything sensitive, rely on the application's own authentication or restrict access at the firewall.
+Blocked local ports (to prevent accidental SMTP relay and similar): `25, 53, 135, 139, 445, 465, 587, 3389`.
 
-The following local ports cannot be used as TCP targets: `25` (SMTP), `53` (DNS), `135` (RPC), `139` (NetBIOS), `445` (SMB), `465/587` (SMTP), `3389` (RDP).
+## WebSockets
 
----
-
-## WebSocket support
-
-WebSocket connections are proxied transparently through HTTP tunnels — no extra configuration needed.
-
----
+Proxied transparently through HTTP tunnels. No extra configuration needed.
 
 ## CLI reference
 
@@ -302,7 +207,7 @@ WebSocket connections are proxied transparently through HTTP tunnels — no extr
 ### `/_admin/tokens` API
 
 ```
-POST /_admin/tokens?name=<name>[&ttl=<duration>]
+POST /_admin/tokens?name=<n>[&ttl=<duration>]
 Authorization: Bearer <admin-secret>
 
 200  {"name":"alice","token":"rift_...","ttl":"1h0m0s"}
@@ -312,11 +217,17 @@ Authorization: Bearer <admin-secret>
 429  too many requests
 ```
 
----
+## Status
 
-## Building from source
+rift started as a project to understand QUIC internals and tunnel architecture end-to-end. It works and is stable for personal and small-team use.
 
-Requires Go 1.22+.
+**What's solid:** HTTP and TCP tunneling, automatic TLS, token auth, reconnection, WebSockets, connection migration.
+
+
+
+## Build from source
+
+Go 1.22+ required.
 
 ```bash
 git clone https://github.com/venkatkrishna07/rift
@@ -331,8 +242,10 @@ make dev-server
 make dev-client
 ```
 
----
+## Contributing
+
+Issues and PRs welcome. For larger changes, open an issue first so we can discuss the approach. Reproduction steps make bug reports much easier to act on.
 
 ## License
 
-MIT
+MIT — see [LICENSE](LICENSE).
