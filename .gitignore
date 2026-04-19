@@ -1,4 +1,4 @@
-rift
+/rift
 *.pem
 /tmp/
 fly.toml
