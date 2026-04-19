@@ -1,0 +1,57 @@
+version: 2
+
+project_name: rift
+
+before:
+  hooks:
+    - go mod tidy
+    - go vet ./...
+
+builds:
+  - id: rift
+    main: ./cmd/rift
+    binary: rift
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w
+      - -X github.com/venkatkrishna07/rift/internal/version.Version={{ .Version }}
+      - -X github.com/venkatkrishna07/rift/internal/version.Commit={{ .Commit }}
+      - -X github.com/venkatkrishna07/rift/internal/version.Date={{ .Date }}
+
+archives:
+  - id: rift
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    files:
+      - README*
+      - LICENSE*
+
+checksum:
+  name_template: "checksums.txt"
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+      - Merge pull request
+      - Merge branch
+
+release:
+  github:
+    owner: venkatkrishna07
+    name: rift
+  draft: false
+  prerelease: auto  # tags like v1.0.0-beta.1 are marked pre-release automatically
