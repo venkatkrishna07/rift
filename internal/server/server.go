@@ -88,6 +88,7 @@ func (s *Server) Run(ctx context.Context) error {
 
 	httpsTLS := s.tlsCfg.Clone()
 	httpsTLS.NextProtos = append([]string{"h2", "http/1.1"}, httpsTLS.NextProtos...)
+	httpsTLS.MinVersion = tls.VersionTLS12 // HTTPS accepts TLS 1.2+; QUIC enforces 1.3 via quicTLS
 
 	eg, egCtx := errgroup.WithContext(ctx)
 	eg.Go(func() error { return s.acceptLoop(egCtx, ln) })

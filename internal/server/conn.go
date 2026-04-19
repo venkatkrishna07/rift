@@ -30,20 +30,60 @@ var subdomainRE = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
 
 // reservedSubdomains is the blocklist of labels clients may not claim.
 var reservedSubdomains = map[string]struct{}{
-	"www":       {},
-	"api":       {},
-	"mail":      {},
-	"smtp":      {},
-	"ftp":       {},
-	"admin":     {},
-	"root":      {},
-	"ns":        {},
-	"ns1":       {},
-	"ns2":       {},
-	"mx":        {},
-	"vpn":       {},
-	"ssh":       {},
-	"localhost": {},
+	"www":        {},
+	"api":        {},
+	"mail":       {},
+	"smtp":       {},
+	"ftp":        {},
+	"admin":      {},
+	"root":       {},
+	"ns":         {},
+	"ns1":        {},
+	"ns2":        {},
+	"ns3":        {},
+	"ns4":        {},
+	"mx":         {},
+	"mx1":        {},
+	"mx2":        {},
+	"vpn":        {},
+	"ssh":        {},
+	"localhost":  {},
+	"cdn":        {},
+	"static":     {},
+	"assets":     {},
+	"media":      {},
+	"images":     {},
+	"img":        {},
+	"docs":       {},
+	"help":       {},
+	"support":    {},
+	"status":     {},
+	"monitor":    {},
+	"dashboard":  {},
+	"panel":      {},
+	"git":        {},
+	"ci":         {},
+	"registry":   {},
+	"auth":       {},
+	"login":      {},
+	"account":    {},
+	"internal":   {},
+	"private":    {},
+	"manage":     {},
+	"portal":     {},
+	"secure":     {},
+	"staging":    {},
+	"prod":       {},
+	"production": {},
+	"dev":        {},
+	"beta":       {},
+	"test":       {},
+	"demo":       {},
+	"db":         {},
+	"database":   {},
+	"cache":      {},
+	"proxy":      {},
+	"gateway":    {},
 }
 
 // validateSubdomain returns a non-nil error if s is not a safe DNS label for
@@ -59,12 +99,16 @@ func validateSubdomain(s string) error {
 }
 
 // blockedLocalPorts lists ports that must not be exposed as TCP tunnels.
-// These are commonly abused for spam/amplification attacks.
+// These are commonly abused for spam/amplification/lateral-movement attacks.
 var blockedLocalPorts = map[uint16]string{
-	25:  "SMTP",
-	53:  "DNS",
-	465: "SMTPS",
-	587: "SMTP submission",
+	25:   "SMTP",
+	53:   "DNS",
+	135:  "RPC",
+	139:  "NetBIOS",
+	445:  "SMB",
+	465:  "SMTPS",
+	587:  "SMTP submission",
+	3389: "RDP",
 }
 
 // validateTCPLocalPort returns an error if port is 0 or on the blocked list.
@@ -167,6 +211,24 @@ func (h *connHandler) run(ctx context.Context) {
 				zap.String("ip", ip),
 				zap.String("token_prefix", tokenHint),
 			)
+
+			// Apply a deadline context so the connection closes automatically
+			// when the token expires. Zero expiry = no deadline.
+			if expiry, err := h.ts.TokenExpiry(ctx, msg.Token); err == nil && !expiry.IsZero() {
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithDeadline(ctx, expiry)
+				defer cancel()
+				context.AfterFunc(ctx, func() {
+					if ctx.Err() == context.DeadlineExceeded {
+						h.log.Info("token expired, closing connection",
+							zap.String("ip", ip),
+							zap.String("token_prefix", tokenHint),
+							zap.Time("expired_at", expiry),
+						)
+						_ = h.conn.CloseWithError(3, "token expired")
+					}
+				})
+			}
 		}
 	}
 

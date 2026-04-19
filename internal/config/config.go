@@ -16,6 +16,9 @@ const (
 	// DefaultMaxTotalConns is the server-wide cap on concurrent QUIC connections.
 	DefaultMaxTotalConns = 500
 
+	// DefaultTokenTTL is the default lifetime for provisioned tokens.
+	DefaultTokenTTL = 1 * time.Hour
+
 	// DefaultTCPPortMin / DefaultTCPPortMax define the port range from which
 	// TCP tunnel ports are randomly allocated. Override with --tcp-port-min /
 	// --tcp-port-max to restrict the range your firewall needs to open.
@@ -35,6 +38,8 @@ type ServerConfig struct {
 	MaxTotalConns int           // max concurrent connections server-wide; 0 → DefaultMaxTotalConns
 	TCPPortMin    uint16        // lower bound of TCP tunnel port range; 0 → DefaultTCPPortMin
 	TCPPortMax    uint16        // upper bound of TCP tunnel port range; 0 → DefaultTCPPortMax
+	AdminSecret   string        // bearer secret for /_admin/tokens; empty = endpoint disabled
+	TokenTTL      time.Duration // default token lifetime; 0 = no expiry
 }
 
 // EffectiveMaxBodyBytes returns the configured limit or the package default.

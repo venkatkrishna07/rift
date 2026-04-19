@@ -10,12 +10,10 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/quic-go/quic-go"
 	"go.uber.org/zap"
-	"golang.org/x/time/rate"
 
 	"github.com/venkatkrishna07/rift/internal/proto"
 	"github.com/venkatkrishna07/rift/internal/relay"
@@ -54,8 +52,15 @@ func (s *Server) serveHTTPS(ctx context.Context, tlsCfg *tls.Config) error {
 	}
 	s.log.Info("HTTPS listener started", zap.String("addr", s.cfg.ListenAddr))
 
-	vrl := newVisitorRateLimiter()
+	// 100 req/s sustained, burst 200; evict idle entries after 10 minutes.
+	vrl := newPerIPLimiter(100, 200, 10*time.Minute)
 	vrl.start(ctx)
+
+	var issuer TokenIssuer
+	if s.cfg.AdminSecret != "" && s.ts != nil {
+		issuer = NewAdminSecretIssuer(s.cfg.AdminSecret, s.ts, s.cfg.TokenTTL, s.log)
+	}
+
 	srv := &http.Server{
 		Handler: &httpHandler{
 			reg:           s.reg,
@@ -63,6 +68,7 @@ func (s *Server) serveHTTPS(ctx context.Context, tlsCfg *tls.Config) error {
 			maxBodyBytes:  s.cfg.EffectiveMaxBodyBytes(),
 			streamTimeout: s.cfg.EffectiveStreamTimeout(),
 			visitorRL:     vrl,
+			issuer:        issuer,
 		},
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       120 * time.Second,
@@ -84,68 +90,16 @@ type httpHandler struct {
 	log           *zap.Logger
 	maxBodyBytes  int64
 	streamTimeout time.Duration
-	visitorRL     *visitorRateLimiter
-}
-
-const (
-	// visitorRateLimit is the sustained request rate per visitor IP (requests/second).
-	visitorRateLimit = 100
-	// visitorRateBurst is the token bucket burst size per visitor IP.
-	visitorRateBurst = 200
-)
-
-// visitorRateLimiter holds a per-source-IP token bucket.
-type visitorRateLimiter struct {
-	mu       sync.Mutex
-	buckets  map[string]*rate.Limiter
-	lastSeen map[string]time.Time
-}
-
-func newVisitorRateLimiter() *visitorRateLimiter {
-	return &visitorRateLimiter{
-		buckets:  make(map[string]*rate.Limiter),
-		lastSeen: make(map[string]time.Time),
-	}
-}
-
-// Allow returns true if the given IP is within its rate limit.
-func (v *visitorRateLimiter) Allow(ip string) bool {
-	v.mu.Lock()
-	l, ok := v.buckets[ip]
-	if !ok {
-		l = rate.NewLimiter(visitorRateLimit, visitorRateBurst)
-		v.buckets[ip] = l
-	}
-	v.lastSeen[ip] = time.Now()
-	v.mu.Unlock()
-	return l.Allow()
-}
-
-// start launches a background goroutine that evicts entries idle for more than 10 minutes.
-func (v *visitorRateLimiter) start(ctx context.Context) {
-	go func() {
-		ticker := time.NewTicker(5 * time.Minute)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ticker.C:
-				v.mu.Lock()
-				cutoff := time.Now().Add(-10 * time.Minute)
-				for ip, t := range v.lastSeen {
-					if t.Before(cutoff) {
-						delete(v.buckets, ip)
-						delete(v.lastSeen, ip)
-					}
-				}
-				v.mu.Unlock()
-			case <-ctx.Done():
-				return
-			}
-		}
-	}()
+	visitorRL     *perIPLimiter
+	issuer        TokenIssuer // nil = no token provisioning endpoint
 }
 
 func (h *httpHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if h.issuer != nil && h.issuer.Match(r) {
+		h.issuer.ServeHTTP(w, r)
+		return
+	}
+
 	visitorIP := clientIP(r.RemoteAddr)
 	if !h.visitorRL.Allow(visitorIP) {
 		h.log.Debug("visitor rate limited", zap.String("ip", visitorIP))

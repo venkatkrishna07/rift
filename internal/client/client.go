@@ -4,6 +4,7 @@ package client
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -34,11 +35,17 @@ func New(cfg config.ClientConfig, ts store.TokenStore, log *zap.Logger) *Client 
 }
 
 // Connect dials the server and reconnects with exponential backoff until ctx is done.
+// Permanent server errors (auth failure, rate limit, token expired) stop the loop immediately.
 func (c *Client) Connect(ctx context.Context) {
 	const maxBackoff = 30 * time.Second
 	backoff := time.Second
 	for {
 		if err := c.connect(ctx); err != nil && ctx.Err() == nil {
+			if isPermanentError(err) {
+				c.log.Error("fatal server error — not retrying", zap.Error(err))
+				c.workers.Wait()
+				return
+			}
 			c.log.Error("disconnected", zap.Error(err), zap.Duration("retry_in", backoff))
 			select {
 			case <-ctx.Done():
@@ -55,6 +62,19 @@ func (c *Client) Connect(ctx context.Context) {
 		}
 		backoff = time.Second // reset on clean disconnect
 	}
+}
+
+// isPermanentError returns true for server-signalled errors that retrying won't fix.
+// Error codes:
+//
+//	2 — auth failed or rate limited (IP blocked due to repeated failures)
+//	3 — token expired
+func isPermanentError(err error) bool {
+	var appErr *quic.ApplicationError
+	if errors.As(err, &appErr) {
+		return appErr.ErrorCode == 2 || appErr.ErrorCode == 3
+	}
+	return false
 }
 
 func (c *Client) connect(ctx context.Context) error {

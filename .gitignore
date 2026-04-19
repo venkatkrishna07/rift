@@ -1,3 +1,6 @@
 rift
 *.pem
 /tmp/
+fly.toml
+.claude
+docs/

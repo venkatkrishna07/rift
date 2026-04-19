@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"time"
 
 	"github.com/dgraph-io/badger/v4"
 )
@@ -44,6 +45,23 @@ func OpenBadger(path string) (*BadgerStore, error) {
 	return &BadgerStore{db: db}, nil
 }
 
+// OpenBadgerReadOnly opens an existing BadgerDB at path in read-only mode.
+// Multiple processes can hold read-only handles simultaneously — no lock conflict.
+// Returns nil without error if the path does not exist yet.
+func OpenBadgerReadOnly(path string) (*BadgerStore, error) {
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		return nil, nil
+	}
+	opts := badger.DefaultOptions(path)
+	opts.Logger = nil
+	opts.ReadOnly = true
+	db, err := badger.Open(opts)
+	if err != nil {
+		return nil, fmt.Errorf("open badger (read-only) at %s: %w", path, err)
+	}
+	return &BadgerStore{db: db}, nil
+}
+
 // Close flushes pending writes and closes the database.
 func (s *BadgerStore) Close() error { return s.db.Close() }
 
@@ -54,9 +72,14 @@ func tokenKey(token string) []byte {
 }
 
 // Add stores sha256(token)→name under the server-side prefix. O(1) write.
-func (s *BadgerStore) Add(_ context.Context, name, token string) error {
+// ttl is the token lifetime; 0 means no expiry.
+func (s *BadgerStore) Add(_ context.Context, name, token string, ttl time.Duration) error {
 	return s.db.Update(func(tx *badger.Txn) error {
-		return tx.Set(tokenKey(token), []byte(name))
+		e := badger.NewEntry(tokenKey(token), []byte(name))
+		if ttl > 0 {
+			e = e.WithTTL(ttl)
+		}
+		return tx.SetEntry(e)
 	})
 }
 
@@ -94,4 +117,20 @@ func (s *BadgerStore) Save(_ context.Context, key, token string) error {
 	return s.db.Update(func(tx *badger.Txn) error {
 		return tx.Set([]byte(prefixClient+key), []byte(token))
 	})
+}
+
+// TokenExpiry returns when the token expires; zero time means no expiry.
+func (s *BadgerStore) TokenExpiry(_ context.Context, token string) (time.Time, error) {
+	var expiry time.Time
+	err := s.db.View(func(tx *badger.Txn) error {
+		item, err := tx.Get(tokenKey(token))
+		if err != nil {
+			return err
+		}
+		if exp := item.ExpiresAt(); exp != 0 {
+			expiry = time.Unix(int64(exp), 0)
+		}
+		return nil
+	})
+	return expiry, err
 }
