@@ -1,4 +1,5 @@
 /rift
+.DS_Store
 *.pem
 /tmp/
 fly.toml
