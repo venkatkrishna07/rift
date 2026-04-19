@@ -53,7 +53,7 @@ If your network blocks UDP/443 (some corporate and café networks do), TCP-based
 <br>
 <sub>² ngrok's free tier gives you one random `*.ngrok-free.app` subdomain. Persistent and custom subdomains are on paid plans </sub>
 <br>
-<sub>³ UDP tunnels are on the [roadmap](#roadmap)</sub>
+<sub>³ UDP tunnels are work in progress</sub>
 
 ## Quick start (local)
 
