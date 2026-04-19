@@ -214,7 +214,13 @@ func (h *connHandler) run(ctx context.Context) {
 
 			// Apply a deadline context so the connection closes automatically
 			// when the token expires. Zero expiry = no deadline.
-			if expiry, err := h.ts.TokenExpiry(ctx, msg.Token); err == nil && !expiry.IsZero() {
+			if expiry, err := h.ts.TokenExpiry(ctx, msg.Token); err != nil {
+				h.log.Warn("could not determine token expiry — connection will not auto-disconnect at TTL",
+					zap.String("ip", ip),
+					zap.String("token_prefix", tokenHint),
+					zap.Error(err),
+				)
+			} else if !expiry.IsZero() {
 				var cancel context.CancelFunc
 				ctx, cancel = context.WithDeadline(ctx, expiry)
 				defer cancel()
@@ -277,6 +283,7 @@ func (h *connHandler) run(ctx context.Context) {
 			if subdomain == "" {
 				subdomain, err = randomSubdomain()
 				if err != nil {
+					h.log.Error("generate random subdomain", zap.String("ip", ip), zap.Error(err))
 					_ = proto.WriteMsg(ctrl, &proto.ControlMsg{Type: proto.TypeError, Error: "internal error"})
 					continue
 				}
@@ -387,9 +394,9 @@ func sanitizeProto(s string) string {
 	return string(b)
 }
 
-// randomSubdomain generates a cryptographically random 8-hex-char subdomain.
+// randomSubdomain generates a cryptographically random 12-hex-char subdomain.
 func randomSubdomain() (string, error) {
-	b := make([]byte, 4) // 4 bytes → 8 hex chars
+	b := make([]byte, 6) // 6 bytes → 12 hex chars (~48 bits of entropy)
 	if _, err := rand.Read(b); err != nil {
 		return "", fmt.Errorf("generate subdomain: %w", err)
 	}

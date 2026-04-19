@@ -32,7 +32,8 @@ type Server struct {
 	log         *zap.Logger
 	wg          *worker.Group
 	rl          *rateLimiter
-	connByIP    sync.Map // string(IP) -> *atomic.Int64
+	connMu      sync.Mutex
+	connByIP    map[string]int // IP -> active connection count; guarded by connMu
 	totalConns  atomic.Int64
 }
 
@@ -49,6 +50,7 @@ func New(cfg config.ServerConfig, ts store.TokenStore, tlsCfg *tls.Config, acmeH
 		log:         l,
 		wg:          worker.New(l),
 		rl:          newRateLimiter(),
+		connByIP:    make(map[string]int),
 	}
 }
 
@@ -108,8 +110,8 @@ func (s *Server) Run(ctx context.Context) error {
 		// came from a component failure rather than a graceful shutdown signal.
 		return err
 	}
-	s.rl.Stop()  // stop rate-limiter cleanup goroutine
-	s.wg.Wait()  // drain per-connection goroutines
+	s.wg.Wait()  // drain per-connection goroutines first
+	s.rl.Stop()  // then stop rate-limiter cleanup (no handlers can call RecordFailure after this)
 	return nil
 }
 
@@ -178,21 +180,22 @@ func (s *Server) acceptLoop(ctx context.Context, ln *quic.Listener) error {
 
 // allowConn increments the connection count for ip and returns true if below the limit.
 func (s *Server) allowConn(ip string) bool {
-	v, _ := s.connByIP.LoadOrStore(ip, new(atomic.Int64))
-	count := v.(*atomic.Int64)
-	if count.Add(1) > maxConnsPerIP {
-		count.Add(-1)
+	s.connMu.Lock()
+	defer s.connMu.Unlock()
+	if s.connByIP[ip] >= maxConnsPerIP {
 		return false
 	}
+	s.connByIP[ip]++
 	return true
 }
 
-// releaseConn decrements the connection count for ip and removes the entry when it reaches zero.
+// releaseConn decrements the connection count for ip and removes the map entry when it hits zero.
 func (s *Server) releaseConn(ip string) {
-	if v, ok := s.connByIP.Load(ip); ok {
-		if v.(*atomic.Int64).Add(-1) <= 0 {
-			s.connByIP.Delete(ip)
-		}
+	s.connMu.Lock()
+	defer s.connMu.Unlock()
+	s.connByIP[ip]--
+	if s.connByIP[ip] <= 0 {
+		delete(s.connByIP, ip)
 	}
 }
 

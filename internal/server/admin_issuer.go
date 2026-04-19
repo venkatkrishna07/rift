@@ -14,6 +14,7 @@ import (
 	"github.com/venkatkrishna07/rift/internal/store"
 )
 
+
 // AdminSecretIssuer provisions tunnel tokens via a bearer-secret protected
 // HTTP endpoint. It is the v1 TokenIssuer implementation.
 //
@@ -21,7 +22,7 @@ import (
 // Header:   Authorization: Bearer <secret>
 // Response: {"name":"<name>","token":"rift_...","ttl":"24h0m0s"}
 //
-// Access is restricted to loopback and Fly.io private network addresses.
+// Access is restricted to loopback addresses only.
 // Requests are rate-limited to 5 per minute per IP to prevent brute-force.
 type AdminSecretIssuer struct {
 	secret     string
@@ -54,7 +55,7 @@ func (a *AdminSecretIssuer) Match(r *http.Request) bool {
 func (a *AdminSecretIssuer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	ip := clientIP(r.RemoteAddr)
 
-	// Restrict to loopback and Fly.io private network (fdaa::/8).
+	// Restrict to loopback only.
 	if !isAdminAllowedIP(ip) {
 		a.log.Warn("admin endpoint access denied — IP not allowed", zap.String("ip", ip))
 		http.Error(w, "forbidden", http.StatusForbidden)
@@ -77,8 +78,8 @@ func (a *AdminSecretIssuer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	name := r.URL.Query().Get("name")
-	if name == "" {
-		http.Error(w, "name query param required", http.StatusBadRequest)
+	if name == "" || len(name) > 256 {
+		http.Error(w, "name must be 1–256 characters", http.StatusBadRequest)
 		return
 	}
 
@@ -106,7 +107,7 @@ func (a *AdminSecretIssuer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	a.log.Info("token provisioned", zap.String("name", name), zap.Duration("ttl", ttl))
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(struct {
+	if err := json.NewEncoder(w).Encode(struct {
 		Name  string `json:"name"`
 		Token string `json:"token"`
 		TTL   string `json:"ttl,omitempty"`
@@ -115,22 +116,17 @@ func (a *AdminSecretIssuer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return ""
 		}
 		return ttl.String()
-	}()})
+	}()}); err != nil {
+		// Token is already stored — log enough context for the operator to retrieve it.
+		a.log.Error("failed to write token response; token was stored under name",
+			zap.String("name", name),
+			zap.Error(err),
+		)
+	}
 }
 
-// isAdminAllowedIP returns true if ip is a loopback address or within the
-// Fly.io private network range (fdaa::/8).
+// isAdminAllowedIP returns true if ip is a loopback address.
 func isAdminAllowedIP(ip string) bool {
 	parsed := net.ParseIP(ip)
-	if parsed == nil {
-		return false
-	}
-	if parsed.IsLoopback() {
-		return true
-	}
-	// Fly.io private network uses fdaa::/8 (IPv6).
-	if parsed.To4() == nil && strings.HasPrefix(parsed.String(), "fdaa:") {
-		return true
-	}
-	return false
+	return parsed != nil && parsed.IsLoopback()
 }

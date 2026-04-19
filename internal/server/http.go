@@ -31,12 +31,14 @@ func (s *Server) serveACMEHTTP(ctx context.Context) error {
 		Handler:           s.acmeHandler,
 		ReadHeaderTimeout: 10 * time.Second,
 	}
-	go func() {
+	s.wg.Go("acme-shutdown", func() {
 		<-ctx.Done()
 		shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		_ = srv.Shutdown(shutCtx)
-	}()
+		if err := srv.Shutdown(shutCtx); err != nil {
+			s.log.Error("ACME HTTP server shutdown", zap.Error(err))
+		}
+	})
 	s.log.Info("ACME HTTP-01 listener started", zap.String("addr", addr))
 	if err := srv.ListenAndServe(); err != http.ErrServerClosed {
 		return fmt.Errorf("ACME HTTP listen %s: %w", addr, err)
@@ -73,12 +75,14 @@ func (s *Server) serveHTTPS(ctx context.Context, tlsCfg *tls.Config) error {
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       120 * time.Second,
 	}
-	go func() {
+	s.wg.Go("https-shutdown", func() {
 		<-ctx.Done()
 		shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		_ = srv.Shutdown(shutCtx)
-	}()
+		if err := srv.Shutdown(shutCtx); err != nil {
+			s.log.Error("HTTPS server shutdown", zap.Error(err))
+		}
+	})
 	if err := srv.Serve(ln); err != http.ErrServerClosed {
 		return fmt.Errorf("HTTPS serve: %w", err)
 	}

@@ -72,11 +72,15 @@ func runServer(args []string, log *zap.Logger) error {
 		"Lower bound of TCP tunnel port range (default 10000)")
 	tcpPortMax := fs.Uint("tcp-port-max", uint(config.DefaultTCPPortMax),
 		"Upper bound of TCP tunnel port range (default 65535)")
-	adminSecret := fs.String("admin-secret", os.Getenv("RIFT_ADMIN_SECRET"),
+	adminSecret := fs.String("admin-secret", "",
 		"Bearer secret for /_admin/tokens endpoint (or $RIFT_ADMIN_SECRET)")
 	tokenTTL := fs.Duration("token-ttl", config.DefaultTokenTTL,
-		"Default token lifetime (default 24h; 0 = no expiry)")
+		"Default token lifetime (default 1h; 0 = no expiry)")
 	_ = fs.Parse(args)
+
+	if *adminSecret == "" {
+		*adminSecret = os.Getenv("RIFT_ADMIN_SECRET")
+	}
 
 	if *dev {
 		cfg := zap.NewDevelopmentConfig()
@@ -92,7 +96,11 @@ func runServer(args []string, log *zap.Logger) error {
 	if err != nil {
 		return fmt.Errorf("open token store: %w", err)
 	}
-	defer ts.Close()
+	defer func() {
+		if err := ts.Close(); err != nil {
+			log.Error("close token store", zap.Error(err))
+		}
+	}()
 
 	if *addTok != "" {
 		tok, err := store.GenerateToken()
@@ -161,7 +169,7 @@ func runClient(args []string, log *zap.Logger) error {
 	insecure      := fs.Bool("insecure",       false, "Skip TLS cert verification (dev mode)")
 	forceInsecure := fs.Bool("force-insecure", false, "Allow --insecure with non-localhost servers")
 	tokenArg      := fs.String("token",        "",    "Auth token (overrides DB lookup)")
-	dbPath   := fs.String("db", defaultClientDB(), "BadgerDB data directory")
+	dbPath   := fs.String("db", defaultClientDB(log), "BadgerDB data directory")
 	clientStreamTimeout := fs.Duration("stream-timeout", config.DefaultStreamTimeout,
 		"Data stream idle timeout; stream closed after this much inactivity (default 5m)")
 	var exposeFlags multiFlag
@@ -191,7 +199,11 @@ func runClient(args []string, log *zap.Logger) error {
 		log.Warn("could not open token store, proceeding without saved token", zap.Error(err))
 	} else if bs != nil {
 		ts = bs
-		defer ts.Close()
+		defer func() {
+			if err := ts.Close(); err != nil {
+				log.Error("close client token store", zap.Error(err))
+			}
+		}()
 	}
 
 	cfg := config.ClientConfig{
@@ -203,10 +215,7 @@ func runClient(args []string, log *zap.Logger) error {
 		StreamTimeout: *clientStreamTimeout,
 	}
 	c := client.New(cfg, ts, log)
-	return runWithSignal(func(ctx context.Context) error {
-		c.Connect(ctx)
-		return nil
-	})
+	return runWithSignal(c.Connect)
 }
 
 func parseTunnelSpec(s string) (config.TunnelSpec, error) {
@@ -234,8 +243,13 @@ func runWithSignal(fn func(context.Context) error) error {
 	return fn(ctx)
 }
 
-func defaultClientDB() string {
-	home, _ := os.UserHomeDir()
+func defaultClientDB(log *zap.Logger) string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		log.Warn("could not determine home directory; token DB will be relative to working directory",
+			zap.Error(err))
+		return filepath.Join(".local", "share", "rift")
+	}
 	return filepath.Join(home, ".local", "share", "rift")
 }
 

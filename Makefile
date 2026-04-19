@@ -1,14 +1,15 @@
-.PHONY: build vet tidy lint clean dev-server dev-client
+.PHONY: build test vet tidy lint clean dev-server dev-client
 
 BINARY  := rift
 MODULE  := github.com/venkatkrishna07/rift
 
 # Version is injected by CI via git tags.
-# Local builds always produce "dev" unless you override manually:
+# Local builds auto-detect commit and date from git.
+# Override manually if needed:
 #   make build VERSION=v1.0.0 COMMIT=abc1234 DATE=2026-04-15
 VERSION ?= dev
-COMMIT  ?= none
-DATE    ?= unknown
+COMMIT  ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo none)
+DATE    ?= $(shell date -u +%Y-%m-%d)
 
 LDFLAGS := -ldflags "\
   -X $(MODULE)/internal/version.Version=$(VERSION) \
@@ -17,6 +18,9 @@ LDFLAGS := -ldflags "\
 
 build:
 	go build $(LDFLAGS) -o $(BINARY) ./cmd/rift/
+
+test:
+	go test ./... -timeout 120s -race
 
 vet:
 	go vet ./...

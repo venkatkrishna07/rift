@@ -35,22 +35,24 @@ func New(cfg config.ClientConfig, ts store.TokenStore, log *zap.Logger) *Client 
 }
 
 // Connect dials the server and reconnects with exponential backoff until ctx is done.
-// Permanent server errors (auth failure, rate limit, token expired) stop the loop immediately.
-func (c *Client) Connect(ctx context.Context) {
+// Returns a non-nil error only for permanent server errors (auth failure, rate limit,
+// token expired) that retrying will not fix. Returns nil on clean shutdown via ctx.
+func (c *Client) Connect(ctx context.Context) error {
 	const maxBackoff = 30 * time.Second
 	backoff := time.Second
 	for {
-		if err := c.connect(ctx); err != nil && ctx.Err() == nil {
+		err := c.connect(ctx)
+		if err != nil && ctx.Err() == nil {
 			if isPermanentError(err) {
 				c.log.Error("fatal server error — not retrying", zap.Error(err))
 				c.workers.Wait()
-				return
+				return err
 			}
 			c.log.Error("disconnected", zap.Error(err), zap.Duration("retry_in", backoff))
 			select {
 			case <-ctx.Done():
 				c.workers.Wait()
-				return
+				return nil
 			case <-time.After(backoff):
 			}
 			backoff = min(backoff*2, maxBackoff)
@@ -58,7 +60,7 @@ func (c *Client) Connect(ctx context.Context) {
 		}
 		if ctx.Err() != nil {
 			c.workers.Wait()
-			return
+			return nil
 		}
 		backoff = time.Second // reset on clean disconnect
 	}
@@ -108,7 +110,7 @@ func (c *Client) connect(ctx context.Context) error {
 	}, &quic.Config{
 		MaxIdleTimeout:  30 * time.Second,
 		KeepAlivePeriod: 15 * time.Second,
-		Allow0RTT:       true,
+		Allow0RTT:       false, // server rejects 0-RTT; auth is always sent after 1-RTT handshake
 	})
 	if err != nil {
 		return fmt.Errorf("dial %s: %w", addr, err)
