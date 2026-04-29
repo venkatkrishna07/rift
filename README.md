@@ -14,6 +14,7 @@ Expose localhost to the internet over a single QUIC connection — on infrastruc
 ```
   localhost:3000  ──── QUIC ────▶  https://myapp.tunnel.example.com
   localhost:5432  ──── QUIC ────▶  tunnel.example.com:10247
+  localhost:9090  ──── QUIC ────▶  mcp.example.com (MCP server)
 ```
 
 ```bash
@@ -44,6 +45,7 @@ If your network blocks UDP/443 (some corporate and café networks do), TCP-based
 | Transport | QUIC | HTTP/2 | QUIC | TCP | TCP |
 | HTTP + subdomains | ✅ | ✅² | ✅ | ✅ | ❌ |
 | TCP tunnels | ✅ | ✅ | ✅ | ✅ | ✅ |
+| MCP tunnels | ✅ | ❌ | ❌ | ❌ | ❌ |
 | UDP tunnels | ⏳³ | ❌ | ❌ | ✅ | ❌ |
 | WebSockets | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Auto TLS (Let's Encrypt) | ✅ | managed | managed | manual | ❌ |
@@ -112,7 +114,6 @@ rift server \
   --key  /path/to/privkey.pem
 ```
 
-Systemd unit example in [docs/systemd.md](docs/systemd.md).
 
 ## Tokens
 
@@ -149,6 +150,29 @@ rift client --server tunnel.example.com --token rift_... \
 **Persistent tokens.** After the first run, the token is cached in `~/.local/share/rift` and picked up automatically on subsequent connections to the same server.
 
 **Reconnection.** Exponential backoff from 1s up to 30s. Permanent errors (invalid token, expired token, blocked IP) exit immediately instead of looping.
+
+## MCP tunnels
+
+rift can tunnel MCP (Model Context Protocol) servers through [caddy-mcp](https://github.com/venkatkrishna07/caddy-mcp) — a Caddy plugin that exposes MCP servers via QUIC.
+
+```bash
+# Start your MCP server locally
+./my-mcp-server --port 9090
+
+# Connect through caddy-mcp
+rift client --server mcp.example.com --protocol mcp --token mcp_... \
+  --expose 9090:http:code-server
+```
+
+The `--protocol mcp` flag switches the wire protocol from `rift-v1` to `mcp-v1` (24-byte tunnel headers, MCP-aware registration). The MCP server is then accessible through Caddy's HTTP endpoint with full Streamable HTTP transport support — tools, resources, prompts, and SSE notifications all work through the tunnel.
+
+**Dev mode:**
+```bash
+rift client --server localhost:4433 --protocol mcp --insecure \
+  --expose 9090:http:code-server
+```
+
+> MCP tunnels currently support one tunnel per connection. The `--expose` format is `PORT:http:TUNNEL_NAME` where TUNNEL_NAME must match the tunnel name configured in caddy-mcp's Caddyfile.
 
 ## TCP tunnels
 
@@ -197,12 +221,13 @@ Proxied transparently through HTTP tunnels. No extra configuration needed.
 | `--server` | — | Server host or host:port **(required)** |
 | `--expose` | — | `PORT:PROTO[:NAME]` — repeatable **(required)** |
 | `--token` | — | Auth token (overrides DB lookup) |
+| `--protocol` | `rift` | Wire protocol: `rift` or `mcp` |
 | `--db` | `~/.local/share/rift` | Local token store |
 | `--stream-timeout` | `5m` | Idle stream timeout |
 | `--insecure` | — | Skip TLS verification (dev server only) |
 | `--force-insecure` | — | Allow `--insecure` for non-localhost servers (also requires `RIFT_FORCE_INSECURE=yes`) |
 
-`--expose` format: `PORT:http`, `PORT:tcp`, or `PORT:http:name` for a fixed subdomain.
+`--expose` format: `PORT:http`, `PORT:tcp`, `PORT:http:name` for a fixed subdomain, or `PORT:http:tunnel-name` with `--protocol mcp`.
 
 ### `/_admin/tokens` API
 
