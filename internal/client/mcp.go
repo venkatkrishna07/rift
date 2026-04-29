@@ -16,7 +16,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/venkatkrishna07/rift/internal/config"
-	mcpproto "github.com/venkatkrishnas/caddy-mcp/proto"
+	mcpproto "github.com/venkatkrishna07/caddy-mcp/proto"
 )
 
 const mcpMaxBodyBytes = 100 * 1024 * 1024 // 100 MiB

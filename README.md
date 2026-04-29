@@ -153,7 +153,7 @@ rift client --server tunnel.example.com --token rift_... \
 
 ## MCP tunnels
 
-rift can tunnel MCP (Model Context Protocol) servers through [caddy-mcp](https://github.com/venkatkrishnas/caddy-mcp) — a Caddy plugin that exposes MCP servers via QUIC.
+rift can tunnel MCP (Model Context Protocol) servers through [caddy-mcp](https://github.com/venkatkrishna07/caddy-mcp) — a Caddy plugin that exposes MCP servers via QUIC.
 
 ```bash
 # Start your MCP server locally

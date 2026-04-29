@@ -5,14 +5,12 @@ go 1.25.1
 require (
 	github.com/dgraph-io/badger/v4 v4.9.1
 	github.com/quic-go/quic-go v0.59.0
-	github.com/venkatkrishnas/caddy-mcp v0.0.0-00010101000000-000000000000
+	github.com/venkatkrishna07/caddy-mcp v0.0.3
 	go.uber.org/zap v1.27.1
 	golang.org/x/crypto v0.50.0
 	golang.org/x/sync v0.20.0
 	golang.org/x/time v0.15.0
 )
-
-replace github.com/venkatkrishnas/caddy-mcp => ../caddy-mcp
 
 require (
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
