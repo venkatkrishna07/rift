@@ -24,6 +24,11 @@ const (
 	// --tcp-port-max to restrict the range your firewall needs to open.
 	DefaultTCPPortMin uint16 = 10000
 	DefaultTCPPortMax uint16 = 65535
+
+	// ProtocolRift is the default wire protocol for caddy-rift servers.
+	ProtocolRift = "rift"
+	// ProtocolMCP is the wire protocol for caddy-mcp servers.
+	ProtocolMCP = "mcp"
 )
 
 // ServerConfig holds all server-side configuration.
@@ -91,6 +96,7 @@ type ClientConfig struct {
 	ForceInsecure bool          // allow --insecure with non-localhost servers
 	DBPath        string        // BadgerDB data directory for token persistence
 	StreamTimeout time.Duration // data stream idle timeout; 0 → DefaultStreamTimeout
+	Protocol      string        // "rift" (default) or "mcp"
 }
 
 // EffectiveStreamTimeout returns the configured timeout or the package default.

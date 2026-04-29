@@ -112,7 +112,6 @@ rift server \
   --key  /path/to/privkey.pem
 ```
 
-Systemd unit example in [docs/systemd.md](docs/systemd.md).
 
 ## Tokens
 

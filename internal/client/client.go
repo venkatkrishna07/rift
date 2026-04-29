@@ -104,6 +104,10 @@ func (c *Client) connect(ctx context.Context) error {
 		)
 	}
 
+	if c.cfg.Protocol == config.ProtocolMCP {
+		return c.connectMCP(ctx, addr, token)
+	}
+
 	conn, err := quic.DialAddr(ctx, addr, &tls.Config{
 		InsecureSkipVerify: c.cfg.Insecure, //nolint:gosec // controlled by ForceInsecure guard above
 		NextProtos:         []string{"rift-v1"},
