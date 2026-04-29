@@ -170,6 +170,7 @@ func runClient(args []string, log *zap.Logger) error {
 	forceInsecure := fs.Bool("force-insecure", false, "Allow --insecure with non-localhost servers")
 	tokenArg      := fs.String("token",        "",    "Auth token (overrides DB lookup)")
 	dbPath   := fs.String("db", defaultClientDB(log), "BadgerDB data directory")
+	protocol      := fs.String("protocol",       "rift", "Wire protocol: rift or mcp")
 	clientStreamTimeout := fs.Duration("stream-timeout", config.DefaultStreamTimeout,
 		"Data stream idle timeout; stream closed after this much inactivity (default 5m)")
 	var exposeFlags multiFlag
@@ -206,6 +207,10 @@ func runClient(args []string, log *zap.Logger) error {
 		}()
 	}
 
+	if *protocol != config.ProtocolRift && *protocol != config.ProtocolMCP {
+		return fmt.Errorf("--protocol must be 'rift' or 'mcp', got %q", *protocol)
+	}
+
 	cfg := config.ClientConfig{
 		Server:        *srvAddr,
 		Token:         *tokenArg,
@@ -213,6 +218,7 @@ func runClient(args []string, log *zap.Logger) error {
 		Insecure:      *insecure,
 		ForceInsecure: *forceInsecure,
 		StreamTimeout: *clientStreamTimeout,
+		Protocol:      *protocol,
 	}
 	c := client.New(cfg, ts, log)
 	return runWithSignal(c.Connect)
@@ -227,7 +233,7 @@ func parseTunnelSpec(s string) (config.TunnelSpec, error) {
 	if err != nil || port == 0 {
 		return config.TunnelSpec{}, fmt.Errorf("invalid port in --expose %q", s)
 	}
-	if parts[1] != proto.ProtoHTTP && parts[1] != proto.ProtoTCP {
+	if parts[1] != proto.ProtoHTTP && parts[1] != proto.ProtoTCP && parts[1] != config.ProtocolMCP {
 		return config.TunnelSpec{}, fmt.Errorf("unknown proto %q in --expose %q", parts[1], s)
 	}
 	var name string
