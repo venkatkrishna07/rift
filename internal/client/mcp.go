@@ -91,7 +91,7 @@ func (c *Client) connectMCP(ctx context.Context, addr, token string) error {
 	}
 	c.log.Info("authenticated (mcp)")
 
-	// MCP protocol is single-tunnel; pkg/rift.NewClient and the guard at the top
+	// MCP protocol is single-tunnel; rift.NewClient and the guard at the top
 	// of connectMCP both reject any other arity, so this index is safe.
 	spec := c.cfg.Tunnels[0]
 

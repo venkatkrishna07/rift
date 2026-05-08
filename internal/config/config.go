@@ -45,7 +45,7 @@ type ServerConfig struct {
 	TCPPortMax    uint16        // upper bound of TCP tunnel port range; 0 → DefaultTCPPortMax
 	TokenTTL      time.Duration // default token lifetime; 0 = no expiry
 	// MaxIncomingStreams caps QUIC streams per connection. The public
-	// pkg/rift.ServerConfig resolves the default before populating this
+	// rift.ServerConfig resolves the default before populating this
 	// field, so the value here is always non-zero.
 	MaxIncomingStreams int64
 }

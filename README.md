@@ -149,6 +149,16 @@ if err := cli.Connect(context.Background()); err != nil {
 - TokenStore interface with a Badger implementation: `rift.OpenBadgerStore(path, log)`. Provision tokens via `rift.NewAdminSecretIssuer(...)` mounted with `rift.WithTokenIssuer(...)`.
 - Single-use semantics: construct a fresh `Server`/`Client` per lifecycle.
 
+Runnable examples in [`examples/`](examples/):
+
+```bash
+# Terminal 1 — embedded server (dev mode, no token auth)
+go run ./examples/server -domain tunnel.localhost -listen 127.0.0.1:4443
+
+# Terminal 2 — embedded client
+go run ./examples/client -server 127.0.0.1:4443 -local 3000 -name myapp -insecure
+```
+
 Full reference: [pkg.go.dev/github.com/venkatkrishna07/rift](https://pkg.go.dev/github.com/venkatkrishna07/rift).
 
 > **MCP support is opt-in.** The default build excludes the `caddy-mcp` dependency. Build or import with `-tags mcp` if you need MCP tunneling: `go get -tags mcp github.com/venkatkrishna07/rift` then `go build -tags mcp ./...`.

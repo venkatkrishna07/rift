@@ -151,7 +151,7 @@ func isPermanentError(err error) bool {
 }
 
 // wrapPermanent maps a permanent-failure error to the public sentinel that
-// pkg/rift exposes. Auth/IP-block path uses code 2 and surfaces as
+// the rift package exposes. Auth/IP-block path uses code 2 and surfaces as
 // ErrAuthFailed; token-expiry uses code 3 and surfaces as ErrTokenExpired.
 // Other errors (e.g. ErrMCPNotCompiled) pass through unchanged.
 func wrapPermanent(err error) error {

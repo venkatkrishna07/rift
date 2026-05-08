@@ -320,7 +320,7 @@ Examples:
 }
 
 // zapRiftLogger adapts *zap.Logger to rift.Logger so the CLI can pass its
-// existing zap logger through pkg/rift options without forcing zap into the
+// existing zap logger through rift options without forcing zap into the
 // public API.
 type zapRiftLogger struct{ log *zap.Logger }
 

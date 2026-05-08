@@ -27,7 +27,7 @@ func TestNewClientRejectsMCPMultiTunnel(t *testing.T) {
 	_ = errors.Is // suppress unused if test compiles
 }
 
-// TestNewClientAcceptsMCPSingleTunnel exercises pkg/rift.NewClient validation
+// TestNewClientAcceptsMCPSingleTunnel exercises rift.NewClient validation
 // only — it does not Connect. The success path is therefore identical on
 // default builds and `-tags mcp` builds. On default builds, calling Connect()
 // on the returned client would fail with ErrMCPNotCompiled (see

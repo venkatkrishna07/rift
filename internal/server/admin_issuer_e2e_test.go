@@ -56,9 +56,9 @@ func (m *memTokenStore) TokenExpiry(context.Context, string) (time.Time, error) 
 
 func (m *memTokenStore) Close() error { return nil }
 
-// TestAdminIssuerE2E exercises the WithTokenIssuer wiring from pkg/rift through
-// the internal HTTP handler. It does not bind a real listener — the issuer's
-// ServeHTTP is exercised directly so we can drive RemoteAddr.
+// TestAdminIssuerE2E exercises the WithTokenIssuer wiring from the public rift
+// package through the internal HTTP handler. It does not bind a real listener
+// — the issuer's ServeHTTP is exercised directly so we can drive RemoteAddr.
 func TestAdminIssuerE2E(t *testing.T) {
 	const secret = "topsecret"
 	store := newMemTokenStore()
