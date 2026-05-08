@@ -5,3 +5,4 @@
 fly.toml
 .claude
 docs/
+.clauge-worktrees/
