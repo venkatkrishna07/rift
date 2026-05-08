@@ -1,3 +1,5 @@
+//go:build mcp
+
 package client
 
 import (
@@ -5,8 +7,10 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"sync"
@@ -16,14 +20,39 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/venkatkrishna07/rift/internal/config"
+	"github.com/venkatkrishna07/rift/internal/server"
 	mcpproto "github.com/venkatkrishna07/caddy-mcp/proto"
 )
+
+// ErrMCPNotCompiled mirrors the symbol exported from mcp_disabled.go so that
+// client.go's isPermanentError check compiles in both build modes. In the
+// `mcp` build this sentinel is never returned — connectMCP runs the real
+// protocol — but the symbol must exist for the dispatch site to type-check.
+var ErrMCPNotCompiled = errors.New("MCP support compiled in")
 
 const mcpMaxBodyBytes = 100 * 1024 * 1024 // 100 MiB
 
 // connectMCP implements the caddy-mcp wire protocol: ALPN mcp-v1,
 // 24-byte tunnel headers, and HTTP request/response proxying.
 func (c *Client) connectMCP(ctx context.Context, addr, token string) error {
+	if len(c.cfg.Tunnels) != 1 {
+		return fmt.Errorf("connectMCP: expected exactly 1 tunnel, got %d", len(c.cfg.Tunnels))
+	}
+	// Defence-in-depth: re-check the insecure-flag policy here so a future
+	// refactor of Connect cannot accidentally bypass it. Mirrors the gate
+	// applied in Client.connect before dial.
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		host = addr
+	}
+	if err := checkInsecureFlags(c.cfg.Insecure, c.cfg.ForceInsecure, host); err != nil {
+		return err
+	}
+	if c.cfg.Insecure {
+		c.log.Warn("TLS DISABLED — MITM attacks are possible (mcp)",
+			zap.String("server", addr),
+		)
+	}
 	conn, err := quic.DialAddr(ctx, addr, &tls.Config{
 		InsecureSkipVerify: c.cfg.Insecure, //nolint:gosec
 		NextProtos:         []string{"mcp-v1"},
@@ -58,15 +87,12 @@ func (c *Client) connectMCP(ctx context.Context, addr, token string) error {
 		return fmt.Errorf("read auth response: %w", err)
 	}
 	if resp.Type != mcpproto.TypeAuthOK {
-		return fmt.Errorf("auth rejected: %s", resp.Error)
+		return fmt.Errorf("%w: %s", server.ErrAuthFailed, resp.Error)
 	}
 	c.log.Info("authenticated (mcp)")
 
-	// Register tunnels — currently single-tunnel only.
-	// Multi-tunnel requires protocol extension (TunnelID in RegisterOK response).
-	if len(c.cfg.Tunnels) > 1 {
-		c.log.Warn("MCP protocol currently supports single tunnel per connection; using first tunnel only")
-	}
+	// MCP protocol is single-tunnel; pkg/rift.NewClient and the guard at the top
+	// of connectMCP both reject any other arity, so this index is safe.
 	spec := c.cfg.Tunnels[0]
 
 	if err := mcpproto.WriteMsg(ctrl, &mcpproto.ControlMsg{

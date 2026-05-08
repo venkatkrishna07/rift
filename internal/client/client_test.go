@@ -24,35 +24,24 @@ func TestIsLocalhost(t *testing.T) {
 	}
 }
 
-func TestCheckInsecureFlagsForceInsecureNoEnv(t *testing.T) {
-	t.Setenv("RIFT_FORCE_INSECURE", "")
-	err := checkInsecureFlags(true, true, "external.example.com")
-	if err == nil {
-		t.Error("expected error when RIFT_FORCE_INSECURE unset, got nil")
-	}
-}
-
-func TestCheckInsecureFlagsForceInsecureWithEnv(t *testing.T) {
-	t.Setenv("RIFT_FORCE_INSECURE", "yes")
+func TestCheckInsecureFlagsForceInsecureAccepted(t *testing.T) {
 	err := checkInsecureFlags(true, true, "external.example.com")
 	if err != nil {
-		t.Errorf("expected nil with RIFT_FORCE_INSECURE=yes, got: %v", err)
+		t.Errorf("expected nil with forceInsecure=true, got: %v", err)
 	}
 }
 
 func TestCheckInsecureFlagsLocalhostNoForce(t *testing.T) {
-	t.Setenv("RIFT_FORCE_INSECURE", "")
 	err := checkInsecureFlags(true, false, "localhost")
 	if err != nil {
-		t.Errorf("localhost+insecure should not require env var, got: %v", err)
+		t.Errorf("localhost+insecure should pass without forceInsecure, got: %v", err)
 	}
 }
 
 func TestCheckInsecureFlagsNonLocalhostNoForce(t *testing.T) {
-	t.Setenv("RIFT_FORCE_INSECURE", "")
 	err := checkInsecureFlags(true, false, "external.example.com")
 	if err == nil {
-		t.Error("expected error for non-localhost without --force-insecure")
+		t.Error("expected error for non-localhost without forceInsecure")
 	}
 }
 

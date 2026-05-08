@@ -7,8 +7,8 @@ import (
 	"errors"
 	"fmt"
 	"net"
-	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/quic-go/quic-go"
@@ -16,6 +16,7 @@ import (
 
 	"github.com/venkatkrishna07/rift/internal/config"
 	"github.com/venkatkrishna07/rift/internal/proto"
+	"github.com/venkatkrishna07/rift/internal/server"
 	"github.com/venkatkrishna07/rift/internal/store"
 	"github.com/venkatkrishna07/rift/internal/worker"
 )
@@ -26,6 +27,11 @@ type Client struct {
 	ts      store.TokenStore
 	log     *zap.Logger
 	workers *worker.Group
+
+	lifecycleMu sync.Mutex
+	cancel      context.CancelFunc
+	done        chan struct{}
+	closeOnce   sync.Once
 }
 
 // New creates a Client.
@@ -34,10 +40,71 @@ func New(cfg config.ClientConfig, ts store.TokenStore, log *zap.Logger) *Client 
 	return &Client{cfg: cfg, ts: ts, log: l, workers: worker.New(l)}
 }
 
+// Close cancels an in-flight Connect and waits for it to return. Idempotent;
+// subsequent calls return nil without blocking. Safe to call before Connect.
+func (c *Client) Close() error {
+	var done chan struct{}
+	var cancel context.CancelFunc
+	c.closeOnce.Do(func() {
+		c.lifecycleMu.Lock()
+		cancel = c.cancel
+		done = c.done
+		c.lifecycleMu.Unlock()
+		if cancel != nil {
+			cancel()
+		}
+	})
+	if done == nil {
+		return nil
+	}
+	select {
+	case <-done:
+		return nil
+	case <-time.After(5 * time.Second):
+		return fmt.Errorf("client close timed out after 5s")
+	}
+}
+
 // Connect dials the server and reconnects with exponential backoff until ctx is done.
 // Returns a non-nil error only for permanent server errors (auth failure, rate limit,
-// token expired) that retrying will not fix. Returns nil on clean shutdown via ctx.
+// token expired) that retrying will not fix, or the parent ctx error
+// (context.Canceled / context.DeadlineExceeded) when the parent ctx caused
+// the exit. Returns nil only when Close was the cause of exit.
+//
+// When the parent ctx expires while the most recent dial attempt failed
+// (typically TLS verification or a refused connection), the returned error
+// joins the parent ctx error with the last connection error so callers can
+// inspect both via errors.Is.
 func (c *Client) Connect(ctx context.Context) error {
+	parentCtx := ctx
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	done := make(chan struct{})
+	c.lifecycleMu.Lock()
+	c.cancel = cancel
+	c.done = done
+	c.lifecycleMu.Unlock()
+	defer close(done)
+
+	var lastConnErr error
+
+	// exitErr surfaces the parent ctx error when it caused the exit, joined
+	// with the last connection error if one was captured (so TLS / refused
+	// failures are observable rather than masked by ctx.Err()).
+	exitErr := func() error {
+		pe := parentCtx.Err()
+		if pe == nil {
+			return nil
+		}
+		if lastConnErr != nil {
+			return errors.Join(pe, lastConnErr)
+		}
+		return pe
+	}
+
+	ctx = runCtx
+
 	const maxBackoff = 30 * time.Second
 	backoff := time.Second
 	for {
@@ -46,13 +113,14 @@ func (c *Client) Connect(ctx context.Context) error {
 			if isPermanentError(err) {
 				c.log.Error("fatal server error — not retrying", zap.Error(err))
 				c.workers.Wait()
-				return err
+				return wrapPermanent(err)
 			}
+			lastConnErr = err
 			c.log.Error("disconnected", zap.Error(err), zap.Duration("retry_in", backoff))
 			select {
 			case <-ctx.Done():
 				c.workers.Wait()
-				return nil
+				return exitErr()
 			case <-time.After(backoff):
 			}
 			backoff = min(backoff*2, maxBackoff)
@@ -60,7 +128,7 @@ func (c *Client) Connect(ctx context.Context) error {
 		}
 		if ctx.Err() != nil {
 			c.workers.Wait()
-			return nil
+			return exitErr()
 		}
 		backoff = time.Second // reset on clean disconnect
 	}
@@ -71,12 +139,32 @@ func (c *Client) Connect(ctx context.Context) error {
 //
 //	2 — auth failed or rate limited (IP blocked due to repeated failures)
 //	3 — token expired
+//
+// Also returns true for ErrMCPNotCompiled — the binary lacks MCP support and
+// retrying will not fix the missing dependency.
 func isPermanentError(err error) bool {
 	var appErr *quic.ApplicationError
 	if errors.As(err, &appErr) {
 		return appErr.ErrorCode == 2 || appErr.ErrorCode == 3
 	}
-	return false
+	return errors.Is(err, ErrMCPNotCompiled)
+}
+
+// wrapPermanent maps a permanent-failure error to the public sentinel that
+// pkg/rift exposes. Auth/IP-block path uses code 2 and surfaces as
+// ErrAuthFailed; token-expiry uses code 3 and surfaces as ErrTokenExpired.
+// Other errors (e.g. ErrMCPNotCompiled) pass through unchanged.
+func wrapPermanent(err error) error {
+	var appErr *quic.ApplicationError
+	if errors.As(err, &appErr) {
+		switch appErr.ErrorCode {
+		case 2:
+			return fmt.Errorf("%w: %w", server.ErrAuthFailed, err)
+		case 3:
+			return fmt.Errorf("%w: %w", server.ErrTokenExpired, err)
+		}
+	}
+	return err
 }
 
 func (c *Client) connect(ctx context.Context) error {
@@ -143,7 +231,7 @@ func (c *Client) connect(ctx context.Context) error {
 		return fmt.Errorf("read auth response: %w", err)
 	}
 	if resp.Type != proto.TypeAuthOK {
-		return fmt.Errorf("auth rejected: %s", resp.Error)
+		return fmt.Errorf("%w: %s", server.ErrAuthFailed, resp.Error)
 	}
 	c.log.Info("authenticated")
 
@@ -195,24 +283,19 @@ func (c *Client) connect(ctx context.Context) error {
 }
 
 // checkInsecureFlags validates the --insecure / --force-insecure combination.
-// Separating this logic makes it testable without a real QUIC connection.
+// Callers (the CLI) are responsible for any environment-variable double-check
+// before setting forceInsecure; the library never reads process env.
 func checkInsecureFlags(insecure, forceInsecure bool, host string) error {
 	if !insecure {
 		return nil
 	}
 	if forceInsecure {
-		if os.Getenv("RIFT_FORCE_INSECURE") != "yes" {
-			return fmt.Errorf(
-				"--force-insecure requires the environment variable RIFT_FORCE_INSECURE=yes " +
-					"to prevent accidental TLS verification bypass on production servers",
-			)
-		}
 		return nil
 	}
 	if !isLocalhost(host) {
 		return fmt.Errorf(
-			"--insecure is only allowed with localhost targets; "+
-				"use --force-insecure (and set RIFT_FORCE_INSECURE=yes) for %q",
+			"insecure mode is only allowed with localhost targets; "+
+				"set AcknowledgeInsecure to bypass cert verification for %q",
 			host,
 		)
 	}

@@ -15,11 +15,11 @@ import (
 
 // ErrSubdomainTaken is returned by RegisterHTTP when the subdomain is already
 // claimed by an active tunnel.
-var ErrSubdomainTaken = errors.New("subdomain already in use")
+var ErrSubdomainTaken = errors.New("rift: subdomain already in use")
 
 // ErrPortsExhausted is returned by RegisterTCP when no free port can be found
 // in the configured TCP port range.
-var ErrPortsExhausted = errors.New("no TCP ports available in configured range")
+var ErrPortsExhausted = errors.New("rift: no TCP ports available in configured range")
 
 const maxVisitors = 50
 
