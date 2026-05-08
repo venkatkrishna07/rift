@@ -58,10 +58,7 @@ func (s *Server) serveHTTPS(ctx context.Context, tlsCfg *tls.Config) error {
 	vrl := newPerIPLimiter(100, 200, 10*time.Minute)
 	vrl.start(ctx)
 
-	var issuer TokenIssuer
-	if s.cfg.AdminSecret != "" && s.ts != nil {
-		issuer = NewAdminSecretIssuer(s.cfg.AdminSecret, s.ts, s.cfg.TokenTTL, s.log)
-	}
+	issuer := s.tokenIssuer()
 
 	srv := &http.Server{
 		Handler: &httpHandler{
@@ -71,6 +68,7 @@ func (s *Server) serveHTTPS(ctx context.Context, tlsCfg *tls.Config) error {
 			streamTimeout: s.cfg.EffectiveStreamTimeout(),
 			visitorRL:     vrl,
 			issuer:        issuer,
+			domain:        strings.ToLower(s.cfg.Domain),
 		},
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       120 * time.Second,
@@ -96,9 +94,26 @@ type httpHandler struct {
 	streamTimeout time.Duration
 	visitorRL     *perIPLimiter
 	issuer        TokenIssuer // nil = no token provisioning endpoint
+	domain        string      // lowercased configured base domain; empty = host pin disabled
 }
 
 func (h *httpHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	host := r.Host
+	if i := strings.IndexByte(host, ':'); i != -1 {
+		host = host[:i]
+	}
+	host = strings.ToLower(host)
+
+	// Host pin: refuse requests whose Host does not belong to the configured
+	// domain. Blocks host-header smuggling via multi-SAN certs or upstream
+	// proxies that forward arbitrary Host values to this listener. Empty
+	// h.domain disables the check (e.g. when the handler is mounted on a
+	// caller-provided mux that handles host pinning itself).
+	if h.domain != "" && host != h.domain && !strings.HasSuffix(host, "."+h.domain) {
+		http.Error(w, "misdirected request", http.StatusMisdirectedRequest)
+		return
+	}
+
 	if h.issuer != nil && h.issuer.Match(r) {
 		h.issuer.ServeHTTP(w, r)
 		return
@@ -111,10 +126,6 @@ func (h *httpHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	host := r.Host
-	if i := strings.IndexByte(host, ':'); i != -1 {
-		host = host[:i]
-	}
 	subdomain := strings.SplitN(host, ".", 2)[0]
 	tun := h.reg.BySubdomain(subdomain)
 	if tun == nil {

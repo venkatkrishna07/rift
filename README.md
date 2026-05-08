@@ -7,6 +7,7 @@
 Expose localhost to the internet over a single QUIC connection — on infrastructure you fully own. Built for sharing dev servers, testing webhooks, and demoing work in progress.
 
 [![Go Version](https://img.shields.io/badge/go-1.22+-00ADD8?logo=go)](https://go.dev)
+[![Go Reference](https://pkg.go.dev/badge/github.com/venkatkrishna07/rift.svg)](https://pkg.go.dev/github.com/venkatkrishna07/rift)
 [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
 </div>
@@ -17,9 +18,17 @@ Expose localhost to the internet over a single QUIC connection — on infrastruc
   localhost:9090  ──── QUIC ────▶  mcp.example.com (MCP server)
 ```
 
+Two ways to use it:
+
 ```bash
+# CLI
 rift client --server tunnel.example.com --expose 3000:http:myapp
 # → tunnel ready  https://myapp.tunnel.example.com
+```
+
+```go
+// Library (embed in your own Go program)
+import "github.com/venkatkrishna07/rift"
 ```
 
 That's it. Your local dev server is now reachable on the internet, over HTTPS, through a server you run.
@@ -71,6 +80,78 @@ rift client --server localhost:4443 --insecure --expose 3000:http:myapp
 ```
 
 To go public, swap `--dev` for a real domain and move the server to a VPS. See [Setup](#setup).
+
+## Use as a Go library
+
+rift is also a Go library. Embed a tunnel server or client directly in your own program — same QUIC engine as the CLI, no shell-out, full programmatic control over lifecycle, logging, and auth.
+
+```bash
+go get github.com/venkatkrishna07/rift
+```
+
+**Server:**
+
+```go
+package main
+
+import (
+    "context"
+    "log"
+    "log/slog"
+    "os"
+
+    "github.com/venkatkrishna07/rift"
+)
+
+func main() {
+    tlsCfg, err := rift.DevTLSConfig("tunnel.localhost")
+    if err != nil { log.Fatal(err) }
+
+    srv, err := rift.NewServer(rift.ServerConfig{
+        Domain:     "tunnel.localhost",
+        ListenAddr: "127.0.0.1:4443",
+        Dev:        true,
+    },
+        rift.WithTLSConfig(tlsCfg),
+        rift.WithLogger(rift.SlogAdapter(slog.New(slog.NewTextHandler(os.Stderr, nil)))),
+    )
+    if err != nil { log.Fatal(err) }
+
+    if err := srv.Run(context.Background()); err != nil {
+        log.Fatal(err)
+    }
+}
+```
+
+**Client:**
+
+```go
+cli, err := rift.NewClient(rift.ClientConfig{
+    Server:   "tunnel.example.com:443",
+    Token:    "rift_xxx",
+    Tunnels:  []rift.TunnelSpec{{LocalPort: 3000, Proto: rift.ProtoHTTP, Name: "app"}},
+    Protocol: rift.ProtocolRift,
+})
+if err != nil { log.Fatal(err) }
+defer cli.Close()
+
+if err := cli.Connect(context.Background()); err != nil {
+    log.Fatal(err)
+}
+```
+
+**Highlights:**
+
+- Functional options on both constructors — forward-compatible API.
+- `Logger` interface (slog-shaped). Pass `rift.SlogAdapter(*slog.Logger)`, `rift.NopLogger()`, or any custom impl. No zap dep forced on consumers.
+- Sentinel errors at the boundary — `errors.Is(err, rift.ErrAuthFailed)`, `ErrTokenExpired`, `ErrIPBlocked`, `ErrSubdomainTaken`, `ErrPortsExhausted`.
+- `(*Server).Shutdown(ctx)` and `(*Client).Close()` for graceful lifecycle. `Server.Addr()` exposes the bound UDP address (useful with `:0`).
+- TokenStore interface with a Badger implementation: `rift.OpenBadgerStore(path, log)`. Provision tokens via `rift.NewAdminSecretIssuer(...)` mounted with `rift.WithTokenIssuer(...)`.
+- Single-use semantics: construct a fresh `Server`/`Client` per lifecycle.
+
+Full reference: [pkg.go.dev/github.com/venkatkrishna07/rift](https://pkg.go.dev/github.com/venkatkrishna07/rift).
+
+> **MCP support is opt-in.** The default build excludes the `caddy-mcp` dependency. Build or import with `-tags mcp` if you need MCP tunneling: `go get -tags mcp github.com/venkatkrishna07/rift` then `go build -tags mcp ./...`.
 
 ## How it works
 
@@ -154,6 +235,8 @@ rift client --server tunnel.example.com --token rift_... \
 ## MCP tunnels
 
 rift can tunnel MCP (Model Context Protocol) servers through [caddy-mcp](https://github.com/venkatkrishna07/caddy-mcp) — a Caddy plugin that exposes MCP servers via QUIC.
+
+> MCP support requires the `mcp` build tag so the `caddy-mcp` dep is opt-in for non-MCP users. Build with `make build TAGS=mcp` (or `go build -tags mcp ./cmd/rift`). The default `rift` binary will reject `--protocol mcp` with a clear "MCP support not compiled in" error.
 
 ```bash
 # Start your MCP server locally

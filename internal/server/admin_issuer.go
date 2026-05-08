@@ -1,6 +1,7 @@
 package server
 
 import (
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/json"
 	"net"
@@ -70,8 +71,12 @@ func (a *AdminSecretIssuer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	bearer := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-	// Constant-time comparison prevents timing-based secret enumeration.
-	if subtle.ConstantTimeCompare([]byte(bearer), []byte(a.secret)) != 1 {
+	// Hash both sides to fixed-length digests so the constant-time compare is
+	// genuinely constant-time regardless of bearer length (prevents secret-
+	// length leakage via early-exit on length mismatch in subtle.ConstantTimeCompare).
+	bearerHash := sha256.Sum256([]byte(bearer))
+	secretHash := sha256.Sum256([]byte(a.secret))
+	if subtle.ConstantTimeCompare(bearerHash[:], secretHash[:]) != 1 {
 		a.log.Warn("admin endpoint auth failed", zap.String("ip", ip))
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return

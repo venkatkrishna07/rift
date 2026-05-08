@@ -43,8 +43,11 @@ type ServerConfig struct {
 	MaxTotalConns int           // max concurrent connections server-wide; 0 → DefaultMaxTotalConns
 	TCPPortMin    uint16        // lower bound of TCP tunnel port range; 0 → DefaultTCPPortMin
 	TCPPortMax    uint16        // upper bound of TCP tunnel port range; 0 → DefaultTCPPortMax
-	AdminSecret   string        // bearer secret for /_admin/tokens; empty = endpoint disabled
 	TokenTTL      time.Duration // default token lifetime; 0 = no expiry
+	// MaxIncomingStreams caps QUIC streams per connection. The public
+	// pkg/rift.ServerConfig resolves the default before populating this
+	// field, so the value here is always non-zero.
+	MaxIncomingStreams int64
 }
 
 // EffectiveMaxBodyBytes returns the configured limit or the package default.

@@ -3,13 +3,11 @@ package rift_test
 import (
 	"testing"
 
-	"go.uber.org/zap"
-
-	"github.com/venkatkrishna07/rift/pkg/rift"
+	"github.com/venkatkrishna07/rift"
 )
 
 func TestNewClient(t *testing.T) {
-	cli := rift.NewClient(rift.ClientConfig{
+	cli, err := rift.NewClient(rift.ClientConfig{
 		Server: "localhost:4443",
 		Token:  "rift_test",
 		Tunnels: []rift.TunnelSpec{
@@ -17,8 +15,10 @@ func TestNewClient(t *testing.T) {
 		},
 		Insecure: true,
 		Protocol: rift.ProtocolRift,
-	}, nil, zap.NewNop())
-
+	}, rift.WithClientLogger(rift.NopLogger()))
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
 	if cli == nil {
 		t.Fatal("NewClient returned nil")
 	}

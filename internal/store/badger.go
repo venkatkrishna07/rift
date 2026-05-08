@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/dgraph-io/badger/v4"
+	"go.uber.org/zap"
 )
 
 const (
@@ -22,16 +23,22 @@ type BadgerStore struct {
 	db *badger.DB
 }
 
-// OpenBadger opens (or creates) a BadgerDB at path.
-func OpenBadger(path string) (*BadgerStore, error) {
-	// Create directory with restrictive permissions if it doesn't exist.
+// OpenBadger opens (or creates) a BadgerDB at path. The supplied logger
+// receives a warn-level entry when the directory has loose permissions; pass
+// nil for a no-op logger.
+func OpenBadger(path string, log *zap.Logger) (*BadgerStore, error) {
+	if log == nil {
+		log = zap.NewNop()
+	}
 	if err := os.MkdirAll(path, 0o700); err != nil {
 		return nil, fmt.Errorf("create DB dir %s: %w", path, err)
 	}
-	// Warn if the directory is group- or world-readable.
 	if info, err := os.Stat(path); err == nil {
 		if info.Mode().Perm()&0o077 != 0 {
-			fmt.Fprintf(os.Stderr, "WARNING: rift DB directory %s has permissions %04o — expected 0700\n", path, info.Mode().Perm())
+			log.Warn("rift DB directory has loose permissions — expected 0700",
+				zap.String("path", path),
+				zap.String("mode", fmt.Sprintf("%04o", info.Mode().Perm())),
+			)
 		}
 	}
 
@@ -47,8 +54,12 @@ func OpenBadger(path string) (*BadgerStore, error) {
 
 // OpenBadgerReadOnly opens an existing BadgerDB at path in read-only mode.
 // Multiple processes can hold read-only handles simultaneously — no lock conflict.
-// Returns nil without error if the path does not exist yet.
-func OpenBadgerReadOnly(path string) (*BadgerStore, error) {
+// Returns nil without error if the path does not exist yet. The logger is
+// reserved for future use; pass nil for no-op.
+func OpenBadgerReadOnly(path string, log *zap.Logger) (*BadgerStore, error) {
+	if log == nil {
+		log = zap.NewNop()
+	}
 	if _, err := os.Stat(path); os.IsNotExist(err) {
 		return nil, nil
 	}

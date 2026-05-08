@@ -142,7 +142,10 @@ func (h *connHandler) run(ctx context.Context) {
 
 	// Reject immediately if this IP is rate-limited.
 	if h.rl.IsBlocked(ip) {
-		h.log.Warn("connection rejected — IP rate-limited", zap.String("ip", ip))
+		h.log.Warn("connection rejected — IP rate-limited",
+			zap.String("ip", ip),
+			zap.Error(fmt.Errorf("%w: %s", ErrIPBlocked, ip)),
+		)
 		_ = h.conn.CloseWithError(2, "rate limited")
 		return
 	}
@@ -160,15 +163,19 @@ func (h *connHandler) run(ctx context.Context) {
 	{
 		msg, err := proto.ReadMsg(ctrl)
 		if err != nil || msg.Type != proto.TypeAuth {
+			authErr := fmt.Errorf("%w: bad auth frame", ErrAuthFailed)
+			if err != nil {
+				authErr = fmt.Errorf("%w: bad auth frame: %w", ErrAuthFailed, err)
+			}
 			if !h.dev {
 				blocked := h.rl.RecordFailure(ip)
 				h.log.Warn("bad auth frame",
 					zap.String("ip", ip),
 					zap.Bool("now_blocked", blocked),
-					zap.Error(err),
+					zap.Error(authErr),
 				)
 			} else {
-				h.log.Warn("bad auth frame (dev)", zap.String("ip", ip), zap.Error(err))
+				h.log.Warn("bad auth frame (dev)", zap.String("ip", ip), zap.Error(authErr))
 			}
 			_ = proto.WriteMsg(ctrl, &proto.ControlMsg{Type: proto.TypeError, Error: "expected auth"})
 			_ = h.conn.CloseWithError(2, "auth failed")
@@ -196,6 +203,7 @@ func (h *connHandler) run(ctx context.Context) {
 					zap.String("ip", ip),
 					zap.String("token_prefix", tokenHint),
 					zap.Bool("now_blocked", blocked),
+					zap.Error(fmt.Errorf("%w: invalid token", ErrAuthFailed)),
 				)
 				_ = proto.WriteMsg(ctrl, &proto.ControlMsg{Type: proto.TypeError, Error: "invalid token"})
 				_ = h.conn.CloseWithError(2, "auth failed")
@@ -230,6 +238,7 @@ func (h *connHandler) run(ctx context.Context) {
 							zap.String("ip", ip),
 							zap.String("token_prefix", tokenHint),
 							zap.Time("expired_at", expiry),
+							zap.Error(fmt.Errorf("%w at %s", ErrTokenExpired, expiry.Format(time.RFC3339))),
 						)
 						_ = h.conn.CloseWithError(3, "token expired")
 					}

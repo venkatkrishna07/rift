@@ -35,6 +35,22 @@ type Server struct {
 	connMu      sync.Mutex
 	connByIP    map[string]int // IP -> active connection count; guarded by connMu
 	totalConns  atomic.Int64
+
+	// Lifecycle plumbing. cancel and done are populated by Run; Shutdown
+	// reads them. shutdownInvoked distinguishes a Shutdown-triggered exit from
+	// a parent-ctx-triggered exit so Run can return the correct error.
+	// issuer can be set with SetTokenIssuer at construction time before Run;
+	// serveHTTPS reads it via tokenIssuer() and dispatches matching requests.
+	lifecycleMu     sync.Mutex
+	cancel          context.CancelFunc
+	done            chan struct{}
+	shutdownInvoked bool
+
+	addrMu    sync.RWMutex
+	boundAddr net.Addr
+
+	issuerMu sync.RWMutex
+	issuer   TokenIssuer
 }
 
 // New constructs a Server. ts may be nil when cfg.Dev is true.
@@ -56,6 +72,17 @@ func New(cfg config.ServerConfig, ts store.TokenStore, tlsCfg *tls.Config, acmeH
 
 // Run starts the QUIC listener and HTTPS server, blocks until ctx is cancelled.
 func (s *Server) Run(ctx context.Context) error {
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	done := make(chan struct{})
+	s.lifecycleMu.Lock()
+	s.cancel = cancel
+	s.done = done
+	s.shutdownInvoked = false
+	s.lifecycleMu.Unlock()
+	defer close(done)
+
 	// QUIC TLS: only the rift ALPN — the HTTPS listener uses a separate clone.
 	quicTLS := s.tlsCfg.Clone()
 	quicTLS.NextProtos = []string{"rift-v1"}
@@ -68,6 +95,14 @@ func (s *Server) Run(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("bind UDP %s: %w", s.cfg.ListenAddr, err)
 	}
+	s.addrMu.Lock()
+	s.boundAddr = udpConn.LocalAddr()
+	s.addrMu.Unlock()
+	defer func() {
+		s.addrMu.Lock()
+		s.boundAddr = nil
+		s.addrMu.Unlock()
+	}()
 
 	// quic.Transport gives us direct control over the UDP socket.
 	// VerifySourceAddress enables QUIC Retry for every new connection —
@@ -77,10 +112,10 @@ func (s *Server) Run(ctx context.Context) error {
 		VerifySourceAddress:  func(net.Addr) bool { return true },
 	}
 	ln, err := tr.Listen(quicTLS, &quic.Config{
-		MaxIdleTimeout:    30 * time.Second,
-		KeepAlivePeriod:   15 * time.Second,
-		MaxIncomingStreams: 1000,
-		Allow0RTT:         false,
+		MaxIdleTimeout:     30 * time.Second,
+		KeepAlivePeriod:    15 * time.Second,
+		MaxIncomingStreams: s.cfg.MaxIncomingStreams,
+		Allow0RTT:          false,
 	})
 	if err != nil {
 		_ = udpConn.Close()
@@ -92,7 +127,7 @@ func (s *Server) Run(ctx context.Context) error {
 	httpsTLS.NextProtos = append([]string{"h2", "http/1.1"}, httpsTLS.NextProtos...)
 	httpsTLS.MinVersion = tls.VersionTLS12 // HTTPS accepts TLS 1.2+; QUIC enforces 1.3 via quicTLS
 
-	eg, egCtx := errgroup.WithContext(ctx)
+	eg, egCtx := errgroup.WithContext(runCtx)
 	eg.Go(func() error { return s.acceptLoop(egCtx, ln) })
 	eg.Go(func() error { return s.serveHTTPS(egCtx, httpsTLS) })
 	if s.acmeHandler != nil {
@@ -105,14 +140,77 @@ func (s *Server) Run(ctx context.Context) error {
 		return nil
 	})
 
-	if err := eg.Wait(); err != nil && ctx.Err() == nil {
-		// ctx is the original signal context — if it's not cancelled, the error
-		// came from a component failure rather than a graceful shutdown signal.
-		return err
-	}
+	waitErr := eg.Wait()
 	s.wg.Wait()  // drain per-connection goroutines first
 	s.rl.Stop()  // then stop rate-limiter cleanup (no handlers can call RecordFailure after this)
-	return nil
+
+	// All connection handlers have returned, so every counter should already
+	// be zero. Clear explicitly to drop residual map entries and harden against
+	// any future code path that might leak a slot.
+	s.clearConnByIP()
+
+	if waitErr != nil && runCtx.Err() == nil {
+		// runCtx is the local supervisor context — if it's not cancelled, the
+		// error came from a component failure rather than a graceful shutdown.
+		return waitErr
+	}
+	// runCtx cancelled. Distinguish a Shutdown-triggered exit (return nil)
+	// from a parent-ctx-triggered exit (surface ctx.Err so callers can
+	// detect clean shutdown vs a real failure).
+	s.lifecycleMu.Lock()
+	shutdown := s.shutdownInvoked
+	s.lifecycleMu.Unlock()
+	if shutdown {
+		return nil
+	}
+	return ctx.Err()
+}
+
+// Shutdown cancels Run's supervisor context and waits for it to exit.
+// Returns ctx.Err() if the supplied context expires before Run returns.
+// Calling Shutdown before Run is safe — it is a no-op until Run populates
+// the lifecycle channels.
+func (s *Server) Shutdown(ctx context.Context) error {
+	s.lifecycleMu.Lock()
+	cancel := s.cancel
+	done := s.done
+	if cancel != nil && done != nil {
+		s.shutdownInvoked = true
+	}
+	s.lifecycleMu.Unlock()
+	if cancel == nil || done == nil {
+		return nil
+	}
+	cancel()
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// Addr returns the bound UDP listener address, or nil before Run binds it.
+// Safe to call concurrently.
+func (s *Server) Addr() net.Addr {
+	s.addrMu.RLock()
+	defer s.addrMu.RUnlock()
+	return s.boundAddr
+}
+
+// SetTokenIssuer stores the issuer that will be served before tunnel routing
+// once Run starts the HTTPS listener. Must be called before Run; later calls
+// take effect on the next Run cycle.
+func (s *Server) SetTokenIssuer(iss TokenIssuer) {
+	s.issuerMu.Lock()
+	s.issuer = iss
+	s.issuerMu.Unlock()
+}
+
+func (s *Server) tokenIssuer() TokenIssuer {
+	s.issuerMu.RLock()
+	defer s.issuerMu.RUnlock()
+	return s.issuer
 }
 
 // acceptLoop accepts QUIC connections and dispatches a connHandler per connection.
@@ -141,6 +239,7 @@ func (s *Server) acceptLoop(ctx context.Context, ln *quic.Listener) error {
 			s.log.Warn("per-IP connection limit reached",
 				zap.String("ip", ip),
 				zap.Int("max", maxConnsPerIP),
+				zap.Error(fmt.Errorf("%w: %s exceeded %d concurrent conns", ErrIPBlocked, ip, maxConnsPerIP)),
 			)
 			_ = conn.CloseWithError(1, "too many connections from your IP")
 			continue
@@ -197,6 +296,14 @@ func (s *Server) releaseConn(ip string) {
 	if s.connByIP[ip] <= 0 {
 		delete(s.connByIP, ip)
 	}
+}
+
+// clearConnByIP resets the per-IP counter map. Called from Run after all
+// connection handlers have returned.
+func (s *Server) clearConnByIP() {
+	s.connMu.Lock()
+	s.connByIP = make(map[string]int)
+	s.connMu.Unlock()
 }
 
 // extractIP returns just the host portion of a net.Addr.

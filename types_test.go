@@ -6,11 +6,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/venkatkrishna07/rift/pkg/rift"
+	"github.com/venkatkrishna07/rift/internal/server"
+	"github.com/venkatkrishna07/rift/internal/store"
+	"github.com/venkatkrishna07/rift"
 )
 
 // stubTokenStore satisfies rift.TokenStore. The compiler enforces that every
-// method on store.TokenStore is reachable through the alias.
+// method on the curated interface is reachable.
 type stubTokenStore struct{}
 
 func (stubTokenStore) Validate(context.Context, string) (bool, error)           { return false, nil }
@@ -28,13 +30,21 @@ type stubTokenIssuer struct{}
 func (stubTokenIssuer) Match(*http.Request) bool                     { return false }
 func (stubTokenIssuer) ServeHTTP(http.ResponseWriter, *http.Request) {}
 
-// Compile-time assertions: aliases preserve method sets.
+// Compile-time assertions:
+//   - user-defined types satisfy the curated interfaces;
+//   - internal implementations still satisfy the curated interfaces (so the
+//     wrapper does not silently exclude any production-path types).
 var (
 	_ rift.TokenStore  = stubTokenStore{}
 	_ rift.TokenIssuer = stubTokenIssuer{}
+	_ rift.TokenStore  = (*store.BadgerStore)(nil)
+	_ rift.TokenIssuer = (*server.AdminSecretIssuer)(nil)
 )
 
-func TestTypeAliasesAreUsable(t *testing.T) {
+// TestCuratedTypesAreUsable exercises the curated wrapper structs. Notice
+// AdminSecret is no longer settable on ServerConfig — that field has been
+// removed from the public surface and is wired via WithTokenIssuer instead.
+func TestCuratedTypesAreUsable(t *testing.T) {
 	cfg := rift.ServerConfig{
 		Domain:        "tunnel.example.com",
 		ListenAddr:    ":443",
@@ -45,12 +55,11 @@ func TestTypeAliasesAreUsable(t *testing.T) {
 		MaxTotalConns: 10,
 		TCPPortMin:    20000,
 		TCPPortMax:    30000,
-		AdminSecret:   "secret",
 		TokenTTL:      time.Hour,
 		DBPath:        "/tmp/rift",
 	}
 	if cfg.EffectiveMaxBodyBytes() != 1024 {
-		t.Fatalf("ServerConfig methods not exposed via alias")
+		t.Fatalf("ServerConfig methods not exposed via wrapper")
 	}
 
 	cli := rift.ClientConfig{
@@ -60,7 +69,7 @@ func TestTypeAliasesAreUsable(t *testing.T) {
 		Protocol: rift.ProtocolRift,
 	}
 	if cli.EffectiveStreamTimeout() == 0 {
-		t.Fatalf("ClientConfig methods not exposed via alias")
+		t.Fatalf("ClientConfig methods not exposed via wrapper")
 	}
 
 	if rift.DefaultTokenTTL == 0 {
@@ -68,9 +77,9 @@ func TestTypeAliasesAreUsable(t *testing.T) {
 	}
 
 	if rift.ProtocolMCP == "" || rift.ProtocolMCP == rift.ProtocolRift {
-		t.Fatalf("ProtocolMCP alias is broken or duplicates ProtocolRift")
+		t.Fatalf("ProtocolMCP wrapper is broken or duplicates ProtocolRift")
 	}
 	if rift.ProtoHTTP == "" || rift.ProtoTCP == "" || rift.ProtoHTTP == rift.ProtoTCP {
-		t.Fatalf("ProtoHTTP/ProtoTCP aliases broken: %q / %q", rift.ProtoHTTP, rift.ProtoTCP)
+		t.Fatalf("ProtoHTTP/ProtoTCP wrappers broken: %q / %q", rift.ProtoHTTP, rift.ProtoTCP)
 	}
 }

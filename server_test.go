@@ -6,9 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"go.uber.org/zap"
-
-	"github.com/venkatkrishna07/rift/pkg/rift"
+	"github.com/venkatkrishna07/rift"
 )
 
 func TestNewServerDevMode(t *testing.T) {
@@ -17,18 +15,21 @@ func TestNewServerDevMode(t *testing.T) {
 		t.Fatalf("DevTLSConfig: %v", err)
 	}
 
-	srv := rift.NewServer(rift.ServerConfig{
+	srv, err := rift.NewServer(rift.ServerConfig{
 		Domain:     "tunnel.localhost",
 		ListenAddr: "127.0.0.1:0",
 		Dev:        true,
-	}, nil, tlsCfg, nil, zap.NewNop())
+	}, rift.WithTLSConfig(tlsCfg), rift.WithLogger(rift.NopLogger()))
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
 	if srv == nil {
 		t.Fatal("NewServer returned nil")
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
-	if err := srv.Run(ctx); err != nil && !isContextErr(err) {
+	if err := srv.Run(ctx); !isContextErr(err) {
 		t.Fatalf("Run returned unexpected error: %v", err)
 	}
 }
@@ -45,7 +46,7 @@ func TestProdTLSConfigShape(t *testing.T) {
 }
 
 func TestNewAdminSecretIssuer(t *testing.T) {
-	iss := rift.NewAdminSecretIssuer("topsecret", nil, time.Hour, zap.NewNop())
+	iss := rift.NewAdminSecretIssuer("topsecret", nil, time.Hour, rift.NopLogger())
 	if iss == nil {
 		t.Fatal("NewAdminSecretIssuer returned nil")
 	}
