@@ -1,0 +1,28 @@
+# rift client configuration.
+# Load with:  rift client --config ~/.config/rift/client.toml
+# Or set:     RIFT_CONFIG=~/.config/rift/client.toml
+
+[client]
+server         = "tunnel.example.com"
+token          = ""                    # leave empty to use the saved token DB
+db             = "~/.local/share/rift"
+insecure       = false
+force-insecure = false
+stream-timeout = "5m"
+protocol       = "rift"                # "rift" or "mcp"
+
+# Tunnels declared here are equivalent to repeated --expose flags.
+# Both sources are additive; flag-supplied tunnels are appended to file ones.
+[[tunnels]]
+local-port = 3000
+proto      = "http"
+name       = "myapp"
+
+[[tunnels]]
+local-port = 5432
+proto      = "tcp"
+
+[[tunnels]]
+local-port = 9090
+proto      = "mcp"
+name       = "tools"
