@@ -12,11 +12,14 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"go.uber.org/zap"
 
-	"github.com/venkatkrishna07/rift/internal/version"
 	"github.com/venkatkrishna07/rift"
+	"github.com/venkatkrishna07/rift/cmd/rift/internal/cliconfig"
+	"github.com/venkatkrishna07/rift/cmd/rift/internal/ui"
+	"github.com/venkatkrishna07/rift/cmd/rift/internal/version"
 )
 
 func main() {
@@ -36,8 +39,10 @@ func main() {
 		err = runServer(os.Args[2:], log)
 	case "client":
 		err = runClient(os.Args[2:], log)
-	case "version":
+	case "version", "--version", "-v":
 		fmt.Println(version.String())
+	case "help", "--help", "-h":
+		printUsage()
 	default:
 		fmt.Fprintf(os.Stderr, "unknown subcommand: %s\n\n", os.Args[1])
 		printUsage()
@@ -50,6 +55,7 @@ func main() {
 
 func runServer(args []string, log *zap.Logger) error {
 	fs := flag.NewFlagSet("server", flag.ExitOnError)
+	configPath := fs.String("config", "", "Path to TOML config file (or $RIFT_CONFIG)")
 	domain := fs.String("domain", "tunnel.localhost", "Base domain for HTTP tunnels")
 	listen := fs.String("listen", ":443", "Listen address (QUIC=UDP, HTTPS=TCP share this port)")
 	httpAddr := fs.String("http", ":80", "HTTP listen address for ACME HTTP-01 challenges (prod only)")
@@ -73,6 +79,18 @@ func runServer(args []string, log *zap.Logger) error {
 	tokenTTL := fs.Duration("token-ttl", rift.DefaultTokenTTL,
 		"Default token lifetime (default 1h; 0 = no expiry)")
 	_ = fs.Parse(args)
+
+	setFlags := flagsExplicitlySet(fs)
+	file, err := cliconfig.LoadServerFile(cliconfig.ResolveConfigPath(*configPath))
+	if err != nil {
+		return fmt.Errorf("load config: %w", err)
+	}
+	if file != nil {
+		if err := applyServerFile(file, setFlags, domain, listen, httpAddr, certF, keyF, dbPath,
+			maxBodyBytes, streamTimeout, maxConns, tcpPortMin, tcpPortMax, adminSecret, tokenTTL); err != nil {
+			return err
+		}
+	}
 
 	if *adminSecret == "" {
 		*adminSecret = os.Getenv("RIFT_ADMIN_SECRET")
@@ -166,7 +184,35 @@ func runServer(args []string, log *zap.Logger) error {
 	if err != nil {
 		return fmt.Errorf("construct server: %w", err)
 	}
+
+	ui.PrintServer(os.Stderr, ui.ServerBanner{
+		Version:  version.Version,
+		Domain:   *domain,
+		Listen:   *listen,
+		HTTPAddr: *httpAddr,
+		TLS:      describeTLS(*dev, *certF),
+		Mode:     describeMode(*dev),
+	})
+
 	return runWithSignal(srv.Run)
+}
+
+func describeTLS(dev bool, certPath string) string {
+	switch {
+	case dev:
+		return "self-signed (dev)"
+	case certPath != "":
+		return "pre-provisioned cert"
+	default:
+		return "Let's Encrypt (auto)"
+	}
+}
+
+func describeMode(dev bool) string {
+	if dev {
+		return "dev"
+	}
+	return "production"
 }
 
 type multiFlag []string
@@ -176,6 +222,7 @@ func (m *multiFlag) Set(v string) error { *m = append(*m, v); return nil }
 
 func runClient(args []string, log *zap.Logger) error {
 	fs := flag.NewFlagSet("client", flag.ExitOnError)
+	configPath := fs.String("config", "", "Path to TOML config file (or $RIFT_CONFIG)")
 	srvAddr := fs.String("server", "", "rift server host or host:port (required)")
 	insecure := fs.Bool("insecure", false, "Skip TLS cert verification (dev mode)")
 	forceInsecure := fs.Bool("force-insecure", false, "Allow --insecure with non-localhost servers")
@@ -187,13 +234,6 @@ func runClient(args []string, log *zap.Logger) error {
 	var exposeFlags multiFlag
 	fs.Var(&exposeFlags, "expose", "PORT:PROTO[:NAME], e.g. 3000:http:myapp (repeatable)")
 	_ = fs.Parse(args)
-
-	if *srvAddr == "" {
-		return fmt.Errorf("--server is required")
-	}
-	if len(exposeFlags) == 0 {
-		return fmt.Errorf("at least one --expose flag is required")
-	}
 	if *forceInsecure && os.Getenv("RIFT_FORCE_INSECURE") != "yes" {
 		return fmt.Errorf(
 			"--force-insecure requires the environment variable RIFT_FORCE_INSECURE=yes " +
@@ -208,6 +248,25 @@ func runClient(args []string, log *zap.Logger) error {
 			return err
 		}
 		specs = append(specs, spec)
+	}
+
+	setFlags := flagsExplicitlySet(fs)
+	file, err := cliconfig.LoadClientFile(cliconfig.ResolveConfigPath(*configPath))
+	if err != nil {
+		return fmt.Errorf("load config: %w", err)
+	}
+	if file != nil {
+		if err := applyClientFile(file, setFlags, srvAddr, tokenArg, dbPath,
+			insecure, forceInsecure, clientStreamTimeout, protocol, &specs); err != nil {
+			return err
+		}
+	}
+
+	if *srvAddr == "" {
+		return fmt.Errorf("--server is required (or set client.server in config)")
+	}
+	if len(specs) == 0 {
+		return fmt.Errorf("at least one --expose flag or [[tunnels]] entry is required")
 	}
 
 	// Open read-only — multiple clients can run simultaneously without lock conflicts.
@@ -234,9 +293,18 @@ func runClient(args []string, log *zap.Logger) error {
 		Tunnels:             specs,
 		Insecure:            *insecure,
 		AcknowledgeInsecure: *forceInsecure,
+		DBPath:              *dbPath,
 		StreamTimeout:       *clientStreamTimeout,
 		Protocol:            *protocol,
 	}
+
+	ui.PrintClient(os.Stderr, ui.ClientBanner{
+		Version:    version.Version,
+		Server:     *srvAddr,
+		Protocol:   *protocol,
+		NumTunnels: len(specs),
+	})
+
 	clientOpts := []rift.ClientOption{
 		rift.WithClientLogger(zapRiftLogger{log: log}),
 	}
@@ -248,6 +316,125 @@ func runClient(args []string, log *zap.Logger) error {
 		return fmt.Errorf("construct client: %w", err)
 	}
 	return runWithSignal(c.Connect)
+}
+
+func flagsExplicitlySet(fs *flag.FlagSet) map[string]bool {
+	set := make(map[string]bool)
+	fs.Visit(func(f *flag.Flag) { set[f.Name] = true })
+	return set
+}
+
+func applyServerFile(
+	file *cliconfig.FileServer,
+	set map[string]bool,
+	domain, listen, httpAddr, certF, keyF, dbPath *string,
+	maxBodyBytes *int64,
+	streamTimeout *time.Duration,
+	maxConns *int,
+	tcpPortMin, tcpPortMax *uint,
+	adminSecret *string,
+	tokenTTL *time.Duration,
+) error {
+	s := file.Server
+	if !set["domain"] && s.Domain != "" {
+		*domain = s.Domain
+	}
+	if !set["listen"] && s.Listen != "" {
+		*listen = s.Listen
+	}
+	if !set["http"] && s.HTTP != "" {
+		*httpAddr = s.HTTP
+	}
+	if !set["db"] && s.DB != "" {
+		*dbPath = s.DB
+	}
+	if !set["max-body-bytes"] && s.MaxBodyBytes > 0 {
+		*maxBodyBytes = s.MaxBodyBytes
+	}
+	if !set["max-conns"] && s.MaxConns > 0 {
+		*maxConns = s.MaxConns
+	}
+	if !set["tcp-port-min"] && s.TCPPortMin > 0 {
+		*tcpPortMin = uint(s.TCPPortMin)
+	}
+	if !set["tcp-port-max"] && s.TCPPortMax > 0 {
+		*tcpPortMax = uint(s.TCPPortMax)
+	}
+	if !set["admin-secret"] && s.AdminSecret != "" {
+		*adminSecret = s.AdminSecret
+	}
+	if !set["stream-timeout"] && s.StreamTimeout != "" {
+		d, err := cliconfig.ParseDurationStr(s.StreamTimeout)
+		if err != nil {
+			return fmt.Errorf("server.stream-timeout: %w", err)
+		}
+		*streamTimeout = d
+	}
+	if !set["token-ttl"] && s.TokenTTL != "" {
+		d, err := cliconfig.ParseDurationStr(s.TokenTTL)
+		if err != nil {
+			return fmt.Errorf("server.token-ttl: %w", err)
+		}
+		*tokenTTL = d
+	}
+	if !set["cert"] && file.TLS.Cert != "" {
+		*certF = file.TLS.Cert
+	}
+	if !set["key"] && file.TLS.Key != "" {
+		*keyF = file.TLS.Key
+	}
+	return nil
+}
+
+func applyClientFile(
+	file *cliconfig.FileClient,
+	set map[string]bool,
+	srvAddr, tokenArg, dbPath *string,
+	insecure, forceInsecure *bool,
+	clientStreamTimeout *time.Duration,
+	protocol *string,
+	specs *[]rift.TunnelSpec,
+) error {
+	c := file.Client
+	if !set["server"] && c.Server != "" {
+		*srvAddr = c.Server
+	}
+	if !set["token"] && c.Token != "" {
+		*tokenArg = c.Token
+	}
+	if !set["db"] && c.DB != "" {
+		*dbPath = cliconfig.ExpandHome(c.DB)
+	}
+	if !set["insecure"] && c.Insecure != nil {
+		*insecure = *c.Insecure
+	}
+	if !set["force-insecure"] && c.ForceInsecure != nil {
+		*forceInsecure = *c.ForceInsecure
+	}
+	if !set["protocol"] && c.Protocol != "" {
+		*protocol = c.Protocol
+	}
+	if !set["stream-timeout"] && c.StreamTimeout != "" {
+		d, err := cliconfig.ParseDurationStr(c.StreamTimeout)
+		if err != nil {
+			return fmt.Errorf("client.stream-timeout: %w", err)
+		}
+		*clientStreamTimeout = d
+	}
+	for i, t := range file.Tunnels {
+		if t.LocalPort == 0 {
+			return fmt.Errorf("tunnels[%d]: local-port is required", i)
+		}
+		if t.Proto != rift.ProtoHTTP && t.Proto != rift.ProtoTCP && t.Proto != rift.ProtocolMCP {
+			return fmt.Errorf("tunnels[%d]: unknown proto %q", i, t.Proto)
+		}
+		*specs = append(*specs, rift.TunnelSpec{
+			LocalPort: t.LocalPort,
+			Proto:     t.Proto,
+			Name:      t.Name,
+		})
+	}
+	return nil
 }
 
 func parseTunnelSpec(s string) (rift.TunnelSpec, error) {
@@ -291,9 +478,11 @@ func printUsage() {
 Usage:
   rift server [flags]   Start the tunnel server (run on your VPS)
   rift client [flags]   Connect and expose local services
-  rift version          Print version
+  rift version          Print version (also: --version, -v)
+  rift help             Print this message  (also: --help, -h)
 
 Server flags:
+  --config string       Path to TOML config file (or $RIFT_CONFIG)
   --domain string       Base domain (default: tunnel.localhost)
   --listen string       Listen addr — QUIC=UDP, HTTPS=TCP (default: :443)
   --http string         HTTP listen addr for ACME HTTP-01 challenges (default: :80)
@@ -304,6 +493,7 @@ Server flags:
   --admin-secret string Bearer secret for /_admin/tokens (or $RIFT_ADMIN_SECRET)
 
 Client flags:
+  --config string       Path to TOML config file (or $RIFT_CONFIG)
   --server string       Server host or host:port (required)
   --expose value        PORT:PROTO[:NAME] e.g. 3000:http:myapp (repeatable)
   --token string        Auth token (overrides DB lookup)

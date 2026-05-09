@@ -22,9 +22,8 @@ builds:
       - arm64
     ldflags:
       - -s -w
-      - -X github.com/venkatkrishna07/rift/internal/version.Version={{ .Version }}
-      - -X github.com/venkatkrishna07/rift/internal/version.Commit={{ .Commit }}
-      - -X github.com/venkatkrishna07/rift/internal/version.Date={{ .Date }}
+      - -X github.com/venkatkrishna07/rift/cmd/rift/internal/version.Version={{ .Version }}
+      - -X github.com/venkatkrishna07/rift/cmd/rift/internal/version.Date={{ .Date }}
 
 archives:
   - id: rift

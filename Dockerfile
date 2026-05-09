@@ -3,13 +3,11 @@
 ARG GO_VERSION=1.25
 ARG TAGS=
 ARG VERSION=dev
-ARG COMMIT=none
 ARG DATE=unknown
 
 FROM golang:${GO_VERSION}-alpine AS builder
 ARG TAGS
 ARG VERSION
-ARG COMMIT
 ARG DATE
 RUN apk add --no-cache git
 WORKDIR /src
@@ -25,9 +23,8 @@ RUN --mount=type=cache,target=/go/pkg/mod \
       -trimpath \
       -tags "${TAGS}" \
       -ldflags="-s -w \
-        -X github.com/venkatkrishna07/rift/internal/version.Version=${VERSION} \
-        -X github.com/venkatkrishna07/rift/internal/version.Commit=${COMMIT} \
-        -X github.com/venkatkrishna07/rift/internal/version.Date=${DATE}" \
+        -X github.com/venkatkrishna07/rift/cmd/rift/internal/version.Version=${VERSION} \
+        -X github.com/venkatkrishna07/rift/cmd/rift/internal/version.Date=${DATE}" \
       -o /out/rift ./cmd/rift/
 
 # ---- runtime ----

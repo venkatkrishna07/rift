@@ -290,6 +290,7 @@ Proxied transparently through HTTP tunnels. No extra configuration needed.
 
 | Flag | Default | Description |
 |---|---|---|
+| `--config` | — | Path to TOML config file (or `$RIFT_CONFIG`) |
 | `--domain` | `tunnel.localhost` | Base domain for HTTP tunnels |
 | `--listen` | `:443` | Listen address — QUIC (UDP) and HTTPS (TCP) share this port |
 | `--http` | `:80` | HTTP address for ACME challenges |
@@ -309,6 +310,7 @@ Proxied transparently through HTTP tunnels. No extra configuration needed.
 
 | Flag | Default | Description |
 |---|---|---|
+| `--config` | — | Path to TOML config file (or `$RIFT_CONFIG`) |
 | `--server` | — | Server host or host:port **(required)** |
 | `--expose` | — | `PORT:PROTO[:NAME]` — repeatable **(required)** |
 | `--token` | — | Auth token (overrides DB lookup) |
@@ -332,6 +334,39 @@ Authorization: Bearer <admin-secret>
 403  forbidden (non-loopback IP)
 429  too many requests
 ```
+
+## Configuration
+
+Both `rift server` and `rift client` accept a `--config <path>` flag (or `RIFT_CONFIG=<path>`) pointing at a TOML file. Flags supplied on the command line always override the same key in the file. Unknown keys in the file are rejected at startup with the offending key name to catch typos early.
+
+```toml
+# server.toml
+[server]
+domain = "tunnel.example.com"
+listen = ":443"
+db     = "/var/lib/rift/db"
+
+[tls]
+cert = "/etc/ssl/cert.pem"
+key  = "/etc/ssl/key.pem"
+```
+
+```toml
+# client.toml
+[client]
+server   = "tunnel.example.com"
+protocol = "rift"
+
+[[tunnels]]
+local-port = 3000
+proto      = "http"
+name       = "myapp"
+```
+
+`[[tunnels]]` blocks in the client file are additive with `--expose` flags. `--dev` and `--add-token` are intentionally flag-only and have no config-file equivalent.
+
+Sample configs: [`examples/server.toml`](examples/server.toml), [`examples/client.toml`](examples/client.toml).
+Full schema and precedence rules: [`CONFIG.md`](CONFIG.md).
 
 ## Status
 

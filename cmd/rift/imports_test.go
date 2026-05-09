@@ -11,9 +11,9 @@ import (
 )
 
 // TestNoInternalImportsInMain enforces the architectural invariant that the
-// CLI consumes the rift library through the public rift package only. The
-// single allowed internal import is internal/version, which holds CLI-only
-// build metadata.
+// CLI consumes the rift library through the public rift package only. CLI-only
+// helpers (build metadata, banner, TOML loader) live under cmd/rift/internal/*
+// and are not subject to this check.
 func TestNoInternalImportsInMain(t *testing.T) {
 	fset := token.NewFileSet()
 	f, err := parser.ParseFile(fset, "main.go", nil, parser.ImportsOnly)

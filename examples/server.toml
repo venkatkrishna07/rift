@@ -1,0 +1,26 @@
+# rift server configuration.
+# Load with:  rift server --config /etc/rift/server.toml
+# Or set:     RIFT_CONFIG=/etc/rift/server.toml
+
+[server]
+domain         = "tunnel.example.com"
+listen         = ":443"
+http           = ":80"
+db             = "/var/lib/rift/db"
+
+# Limits and timeouts (omit any field to use the built-in default).
+max-body-bytes = 104857600     # 100 MiB
+stream-timeout = "5m"
+max-conns      = 500
+tcp-port-min   = 10000
+tcp-port-max   = 65535
+token-ttl      = "24h"
+
+# Bearer secret for the /_admin/tokens endpoint.
+# Prefer the $RIFT_ADMIN_SECRET environment variable over a value here.
+admin-secret   = ""
+
+# Pre-provisioned wildcard cert + key. Leave empty to use ACME (Let's Encrypt).
+[tls]
+cert = ""
+key  = ""
