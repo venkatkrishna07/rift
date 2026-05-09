@@ -21,6 +21,7 @@ import (
 	"github.com/venkatkrishna07/rift/internal/proto"
 	"github.com/venkatkrishna07/rift/internal/server"
 	"github.com/venkatkrishna07/rift/internal/store"
+	"github.com/venkatkrishna07/rift/internal/ui"
 	"github.com/venkatkrishna07/rift/internal/version"
 )
 
@@ -171,7 +172,35 @@ func runServer(args []string, log *zap.Logger) error {
 	if !*dev {
 		authStore = ts
 	}
+
+	ui.PrintServer(os.Stderr, ui.ServerBanner{
+		Version:  version.Version,
+		Domain:   *domain,
+		Listen:   *listen,
+		HTTPAddr: *httpAddr,
+		TLS:      describeTLS(*dev, *certF),
+		Mode:     describeMode(*dev),
+	})
+
 	return runWithSignal(server.New(cfg, authStore, tlsCfg, acmeHandler, log).Run)
+}
+
+func describeTLS(dev bool, certPath string) string {
+	switch {
+	case dev:
+		return "self-signed (dev)"
+	case certPath != "":
+		return "pre-provisioned cert"
+	default:
+		return "Let's Encrypt (auto)"
+	}
+}
+
+func describeMode(dev bool) string {
+	if dev {
+		return "dev"
+	}
+	return "production"
 }
 
 type multiFlag []string
@@ -249,6 +278,14 @@ func runClient(args []string, log *zap.Logger) error {
 		StreamTimeout: *clientStreamTimeout,
 		Protocol:      *protocol,
 	}
+
+	ui.PrintClient(os.Stderr, ui.ClientBanner{
+		Version:    version.Version,
+		Server:     *srvAddr,
+		Protocol:   *protocol,
+		NumTunnels: len(specs),
+	})
+
 	c := client.New(cfg, ts, log)
 	return runWithSignal(c.Connect)
 }
