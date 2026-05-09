@@ -23,7 +23,6 @@ builds:
     ldflags:
       - -s -w
       - -X github.com/venkatkrishna07/rift/internal/version.Version={{ .Version }}
-      - -X github.com/venkatkrishna07/rift/internal/version.Commit={{ .Commit }}
       - -X github.com/venkatkrishna07/rift/internal/version.Date={{ .Date }}
 
 archives:

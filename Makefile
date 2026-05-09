@@ -4,16 +4,13 @@ BINARY  := rift
 MODULE  := github.com/venkatkrishna07/rift
 
 # Version is injected by CI via git tags.
-# Local builds auto-detect commit and date from git.
 # Override manually if needed:
-#   make build VERSION=v1.0.0 COMMIT=abc1234 DATE=2026-04-15
+#   make build VERSION=v1.0.0 DATE=2026-04-15
 VERSION ?= dev
-COMMIT  ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo none)
 DATE    ?= $(shell date -u +%Y-%m-%d)
 
 LDFLAGS := -ldflags "\
   -X $(MODULE)/internal/version.Version=$(VERSION) \
-  -X $(MODULE)/internal/version.Commit=$(COMMIT)   \
   -X $(MODULE)/internal/version.Date=$(DATE)"
 
 build:
