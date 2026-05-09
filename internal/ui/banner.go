@@ -28,6 +28,14 @@ var (
 
 	taglineStyle = lipgloss.NewStyle().Foreground(muted).Italic(true)
 
+	pillBase = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#0A0A0A")).
+			Bold(true).
+			Padding(0, 2).
+			MarginLeft(0)
+	serverPill = pillBase.Background(lipgloss.AdaptiveColor{Light: "#06B6D4", Dark: "#67E8F9"})
+	clientPill = pillBase.Background(lipgloss.AdaptiveColor{Light: "#059669", Dark: "#34D399"})
+
 	boxStyle = lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
 			BorderForeground(accent).
@@ -87,6 +95,8 @@ func renderServer(b ServerBanner) string {
 	header := lipgloss.JoinVertical(lipgloss.Left,
 		logoStyle.Render(logo),
 		taglineStyle.Render("self-hosted QUIC tunnel"),
+		"",
+		serverPill.Render("SERVER"),
 	)
 
 	rows := []kv{
@@ -111,6 +121,8 @@ func renderClient(b ClientBanner) string {
 	header := lipgloss.JoinVertical(lipgloss.Left,
 		logoStyle.Render(logo),
 		taglineStyle.Render("self-hosted QUIC tunnel"),
+		"",
+		clientPill.Render("CLIENT"),
 	)
 
 	rows := []kv{
@@ -120,8 +132,7 @@ func renderClient(b ClientBanner) string {
 		{"tunnels", fmt.Sprintf("%d", b.NumTunnels)},
 	}
 	box := boxStyle.Render(renderRows(rows))
-	status := readyStyle.Render("⟳ connecting...")
-	return indent(lipgloss.JoinVertical(lipgloss.Left, "", header, "", box, "", status))
+	return indent(lipgloss.JoinVertical(lipgloss.Left, "", header, "", box))
 }
 
 type kv struct{ k, v string }
@@ -142,7 +153,7 @@ func indent(s string) string {
 }
 
 func printPlainServer(w io.Writer, b ServerBanner) {
-	fmt.Fprintln(w, "rift — self-hosted QUIC tunnel")
+	fmt.Fprintln(w, "rift [SERVER] — self-hosted QUIC tunnel")
 	plainKV(w, "version", b.Version)
 	plainKV(w, "domain", b.Domain)
 	plainKV(w, "listen", b.Listen)
@@ -157,12 +168,11 @@ func printPlainServer(w io.Writer, b ServerBanner) {
 }
 
 func printPlainClient(w io.Writer, b ClientBanner) {
-	fmt.Fprintln(w, "rift — self-hosted QUIC tunnel")
+	fmt.Fprintln(w, "rift [CLIENT] — self-hosted QUIC tunnel")
 	plainKV(w, "version", b.Version)
 	plainKV(w, "server", b.Server)
 	plainKV(w, "protocol", b.Protocol)
 	fmt.Fprintf(w, "  %-10s%d\n", "tunnels", b.NumTunnels)
-	fmt.Fprintln(w, "connecting...")
 }
 
 func plainKV(w io.Writer, k, v string) {
