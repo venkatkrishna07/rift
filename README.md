@@ -6,9 +6,7 @@
 
 Expose localhost to the internet over a single QUIC connection — on infrastructure you fully own. Built for sharing dev servers, testing webhooks, and demoing work in progress.
 
-[![Go Version](https://img.shields.io/badge/go-1.22+-00ADD8?logo=go)](https://go.dev)
-[![Go Reference](https://pkg.go.dev/badge/github.com/venkatkrishna07/rift.svg)](https://pkg.go.dev/github.com/venkatkrishna07/rift)
-[![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+[![Go Version](https://img.shields.io/badge/go-1.22+-00ADD8?logo=go)](https://go.dev) [![Go Reference](https://pkg.go.dev/badge/github.com/venkatkrishna07/rift.svg)](https://pkg.go.dev/github.com/venkatkrishna07/rift) [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
 </div>
 
@@ -359,6 +357,62 @@ make build VERSION=v1.0.0 COMMIT=$(git rev-parse --short HEAD) DATE=$(date -u +%
 make dev-server
 make dev-client
 ```
+
+## Docker
+
+```bash
+# Build image locally
+make docker                    # default build
+make docker-mcp                # with -tags mcp
+
+# Or via docker directly
+docker build -t rift:dev .
+docker build -t rift:dev-mcp --build-arg TAGS=mcp .
+```
+
+The image is multi-stage Alpine — Go builder → minimal runtime. The container runs as a non-root user (`rift`) and writes BadgerDB + ACME cache under `/data` (declared volume). No default subcommand: pass `server …` or `client …` explicitly.
+
+> **Run server and client in separate containers.** They have different roles, different network needs, different lifetimes — typically different machines too. Never collapse them into one container. The image's `ENTRYPOINT` accepts whichever subcommand you pass; one container = one subcommand.
+
+**docker run — server:**
+
+```bash
+docker run -d --name rift \
+  -p 443:443/udp -p 443:443/tcp -p 80:80/tcp \
+  -p 10000-10010:10000-10010/tcp \
+  -v rift-data:/data \
+  -e RIFT_ADMIN_SECRET \
+  rift:dev \
+  server \
+    --domain tunnel.example.com \
+    --listen :443 --http :80 --db /data/db \
+    --admin-secret "$RIFT_ADMIN_SECRET" \
+    --tcp-port-min 10000 --tcp-port-max 10010
+```
+
+**docker run — client** (forward host port 3000 through tunnel):
+
+```bash
+docker run --rm \
+  -e RIFT_TOKEN \
+  rift:dev \
+  client \
+    --server tunnel.example.com \
+    --token "$RIFT_TOKEN" \
+    --expose 3000:http:myapp
+```
+
+**docker compose:**
+
+- [`docker-compose.yml`](docker-compose.yml) — public rift server. Set `RIFT_ADMIN_SECRET` and `RIFT_DOMAIN` in a `.env`, then `docker compose up -d`. ACME cert cache persists under `/data/db/certs`.
+- [`docker-compose.client.yml`](docker-compose.client.yml) — client side. Linux only (uses `network_mode: host` to reach loopback services on the host). On macOS / Windows / Docker Desktop run the client outside Docker, or run the upstream service inside the same Docker network as the client and target it by hostname.
+
+```bash
+docker compose up -d                                       # server
+docker compose -f docker-compose.client.yml up             # client (Linux host)
+```
+
+> **Ports**: QUIC (UDP) and HTTPS (TCP) share `:443`. ACME HTTP-01 needs `:80`. TCP tunnel ports must be published to match `--tcp-port-min`/`--tcp-port-max`. The image only `EXPOSE`s 443 + 80 — bring your own `-p` for the TCP range.
 
 ## Contributing
 

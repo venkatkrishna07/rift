@@ -1,0 +1,37 @@
+# Run a rift client in Docker. Forwards a host-local TCP service through a
+# remote rift server.
+#
+#   1) Start your local service (e.g. dev server on :3000) on the HOST.
+#   2) Set RIFT_SERVER, RIFT_TOKEN, RIFT_LOCAL, RIFT_NAME in .env (or shell).
+#   3) docker compose -f docker-compose.client.yml up
+#
+# Linux: `network_mode: host` lets the client reach localhost services on the
+# host. macOS / Windows / Docker Desktop: comment that line and use
+# `host.docker.internal` as the loopback target instead — but rift's --expose
+# wires by port number, so easier path on Desktop is to run the client outside
+# Docker, or run the upstream service inside its own container on a shared
+# Docker network and target that container by hostname.
+
+services:
+  rift-client:
+    image: ghcr.io/venkatkrishna07/rift:latest
+    container_name: rift-client
+    restart: unless-stopped
+    # Linux only — gives the client direct access to host's loopback.
+    network_mode: host
+    command:
+      - client
+      - --server=${RIFT_SERVER:-tunnel.example.com}
+      - --token=${RIFT_TOKEN}
+      - --expose=${RIFT_LOCAL:-3000}:http:${RIFT_NAME:-myapp}
+      - --db=/data/db
+    volumes:
+      - rift-client-data:/data
+    environment:
+      - RIFT_TOKEN
+      # Set to "yes" only if you understand the implications and need
+      # --insecure against a non-loopback dev server.
+      # - RIFT_FORCE_INSECURE=yes
+
+volumes:
+  rift-client-data:

@@ -1,4 +1,4 @@
-.PHONY: build test vet tidy lint clean dev-server dev-client
+.PHONY: build test vet tidy lint clean dev-server dev-client docker docker-mcp
 
 BINARY  := rift
 MODULE  := github.com/venkatkrishna07/rift
@@ -42,3 +42,23 @@ dev-server:
 dev-client:
 	go run ./cmd/rift/ client --server localhost:4443 --insecure \
 		--expose 3000:http --db /tmp/rift-dev-client
+
+# Build container image. Override IMAGE / TAGS for custom builds.
+#   make docker IMAGE=ghcr.io/you/rift:v1.0.0
+#   make docker-mcp                              # builds with -tags mcp
+IMAGE ?= rift:$(VERSION)
+
+docker:
+	docker build \
+		--build-arg VERSION=$(VERSION) \
+		--build-arg COMMIT=$(COMMIT) \
+		--build-arg DATE=$(DATE) \
+		-t $(IMAGE) .
+
+docker-mcp:
+	docker build \
+		--build-arg VERSION=$(VERSION) \
+		--build-arg COMMIT=$(COMMIT) \
+		--build-arg DATE=$(DATE) \
+		--build-arg TAGS=mcp \
+		-t $(IMAGE)-mcp .
