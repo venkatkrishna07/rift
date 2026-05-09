@@ -3,6 +3,7 @@ module github.com/venkatkrishna07/rift
 go 1.25.1
 
 require (
+	github.com/BurntSushi/toml v1.6.0
 	github.com/dgraph-io/badger/v4 v4.9.1
 	github.com/quic-go/quic-go v0.59.0
 	github.com/venkatkrishna07/caddy-mcp v0.0.3
