@@ -78,6 +78,8 @@ func runServer(args []string, log *zap.Logger) error {
 		"Bearer secret for /_admin/tokens endpoint (or $RIFT_ADMIN_SECRET)")
 	tokenTTL := fs.Duration("token-ttl", rift.DefaultTokenTTL,
 		"Default token lifetime (default 1h; 0 = no expiry)")
+	shutdownTimeout := fs.Duration("shutdown-timeout", 10*time.Second,
+		"Max time to wait for in-flight tunnels to drain on SIGTERM (default 10s)")
 	_ = fs.Parse(args)
 
 	setFlags := flagsExplicitlySet(fs)
@@ -194,7 +196,7 @@ func runServer(args []string, log *zap.Logger) error {
 		Mode:     describeMode(*dev),
 	})
 
-	return runWithSignal(srv.Run)
+	return runWithGracefulShutdown(srv.Run, srv.Shutdown, *shutdownTimeout)
 }
 
 func describeTLS(dev bool, certPath string) string {
@@ -231,6 +233,8 @@ func runClient(args []string, log *zap.Logger) error {
 	protocol := fs.String("protocol", "rift", "Wire protocol: rift or mcp")
 	clientStreamTimeout := fs.Duration("stream-timeout", rift.DefaultStreamTimeout,
 		"Data stream idle timeout; stream closed after this much inactivity (default 5m)")
+	clientShutdownTimeout := fs.Duration("shutdown-timeout", 10*time.Second,
+		"Max time to wait for graceful client shutdown on SIGTERM (default 10s)")
 	var exposeFlags multiFlag
 	fs.Var(&exposeFlags, "expose", "PORT:PROTO[:NAME], e.g. 3000:http:myapp (repeatable)")
 	_ = fs.Parse(args)
@@ -315,7 +319,11 @@ func runClient(args []string, log *zap.Logger) error {
 	if err != nil {
 		return fmt.Errorf("construct client: %w", err)
 	}
-	return runWithSignal(c.Connect)
+	return runWithGracefulShutdown(
+		c.Connect,
+		func(context.Context) error { return c.Close() },
+		*clientShutdownTimeout,
+	)
 }
 
 func flagsExplicitlySet(fs *flag.FlagSet) map[string]bool {
@@ -460,6 +468,39 @@ func runWithSignal(fn func(context.Context) error) error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	return fn(ctx)
+}
+
+func runWithGracefulShutdown(
+	runFn func(context.Context) error,
+	shutdownFn func(context.Context) error,
+	timeout time.Duration,
+) error {
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	return runWithGracefulShutdownCtx(ctx, runFn, shutdownFn, timeout)
+}
+
+func runWithGracefulShutdownCtx(
+	ctx context.Context,
+	runFn func(context.Context) error,
+	shutdownFn func(context.Context) error,
+	timeout time.Duration,
+) error {
+	runErr := make(chan error, 1)
+	go func() { runErr <- runFn(ctx) }()
+
+	select {
+	case err := <-runErr:
+		return err
+	case <-ctx.Done():
+	}
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	if err := shutdownFn(shutdownCtx); err != nil {
+		return fmt.Errorf("graceful shutdown: %w", err)
+	}
+	return <-runErr
 }
 
 func defaultClientDB(log *zap.Logger) string {
