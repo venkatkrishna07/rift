@@ -151,7 +151,7 @@ func runServer(args []string, log *zap.Logger) error {
 			MinVersion:   tls.VersionTLS13,
 		}
 	default:
-		tlsCfg, acmeHandler = rift.ProdTLSConfig(*domain, filepath.Join(*dbPath, "certs"))
+		tlsCfg, acmeHandler = rift.ProdTLSConfig(*domain, filepath.Join(*dbPath, "certs"), zapRiftLogger{log: log})
 	}
 
 	cfg := rift.ServerConfig{

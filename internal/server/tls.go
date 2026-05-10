@@ -12,9 +12,11 @@ import (
 	"fmt"
 	"math/big"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
+	"go.uber.org/zap"
 	"golang.org/x/crypto/acme/autocert"
 )
 
@@ -66,7 +68,26 @@ func DevTLSConfig(domain string) (*tls.Config, error) {
 //
 // Mount the returned http.Handler on port 80 to enable HTTP-01 as a fallback
 // challenge method — this is faster and more reliable than TLS-ALPN-01 alone.
-func ProdTLSConfig(domain, cacheDir string) (*tls.Config, http.Handler) {
+//
+// cacheDir is created with mode 0700 if it does not exist. If the directory
+// already exists with looser permissions, a warning is logged but the open
+// proceeds so existing deployments are not broken. log may be nil.
+func ProdTLSConfig(domain, cacheDir string, log *zap.Logger) (*tls.Config, http.Handler) {
+	if log == nil {
+		log = zap.NewNop()
+	}
+	if err := os.MkdirAll(cacheDir, 0o700); err != nil {
+		log.Warn("could not prepare ACME cache directory — autocert will retry on first issuance",
+			zap.String("path", cacheDir),
+			zap.Error(err),
+		)
+	} else if info, err := os.Stat(cacheDir); err == nil && info.Mode().Perm()&0o077 != 0 {
+		log.Warn("ACME cache directory has loose permissions — expected 0700",
+			zap.String("path", cacheDir),
+			zap.String("mode", fmt.Sprintf("%04o", info.Mode().Perm())),
+		)
+	}
+
 	suffix := "." + domain
 	m := &autocert.Manager{
 		Prompt: autocert.AcceptTOS,
@@ -84,5 +105,42 @@ func ProdTLSConfig(domain, cacheDir string) (*tls.Config, http.Handler) {
 	}
 	cfg := m.TLSConfig()
 	cfg.MinVersion = tls.VersionTLS13
+
+	// Wrap GetCertificate so issuance/renewal failures surface in operator
+	// logs rather than only emerging when a TLS handshake fails. Successful
+	// returns log at debug to avoid spamming production.
+	inner := cfg.GetCertificate
+	cfg.GetCertificate = func(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
+		cert, err := inner(hello)
+		if err != nil {
+			log.Warn("ACME certificate issuance failed",
+				zap.String("server_name", hello.ServerName),
+				zap.Error(err),
+			)
+			return nil, err
+		}
+		log.Debug("ACME certificate served",
+			zap.String("server_name", hello.ServerName),
+			zap.Time("expires", certNotAfter(cert)),
+		)
+		return cert, nil
+	}
 	return cfg, m.HTTPHandler(nil)
+}
+
+func certNotAfter(c *tls.Certificate) time.Time {
+	if c == nil {
+		return time.Time{}
+	}
+	if c.Leaf != nil {
+		return c.Leaf.NotAfter
+	}
+	if len(c.Certificate) == 0 {
+		return time.Time{}
+	}
+	parsed, err := x509.ParseCertificate(c.Certificate[0])
+	if err != nil {
+		return time.Time{}
+	}
+	return parsed.NotAfter
 }

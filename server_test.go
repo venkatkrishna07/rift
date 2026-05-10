@@ -39,7 +39,7 @@ func isContextErr(err error) bool {
 }
 
 func TestProdTLSConfigShape(t *testing.T) {
-	cfg, h := rift.ProdTLSConfig("tunnel.example.com", t.TempDir())
+	cfg, h := rift.ProdTLSConfig("tunnel.example.com", t.TempDir(), rift.NopLogger())
 	if cfg == nil || h == nil {
 		t.Fatalf("ProdTLSConfig returned nil components: cfg=%v h=%v", cfg, h)
 	}

@@ -97,8 +97,11 @@ func DevTLSConfig(domain string) (*tls.Config, error) {
 // ProdTLSConfig returns a Let's Encrypt-backed *tls.Config and an HTTP handler
 // for HTTP-01 challenges. Mount the returned handler on port 80 (or whatever
 // you set as ServerConfig.ACMEAddr).
-func ProdTLSConfig(domain, cacheDir string) (*tls.Config, http.Handler) {
-	return server.ProdTLSConfig(domain, cacheDir)
+//
+// log receives ACME issuance attempts (debug) and renewal failures (warn).
+// Pass nil or NopLogger() for silence.
+func ProdTLSConfig(domain, cacheDir string, log Logger) (*tls.Config, http.Handler) {
+	return server.ProdTLSConfig(domain, cacheDir, zapFromLogger(log))
 }
 
 // NewAdminSecretIssuer returns a TokenIssuer that handles
