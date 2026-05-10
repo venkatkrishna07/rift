@@ -15,3 +15,9 @@ var ErrTokenExpired = errors.New("rift: token expired")
 // ErrIPBlocked indicates the source IP was rejected by the per-IP rate
 // limiter for excessive failed auth attempts.
 var ErrIPBlocked = errors.New("rift: source IP blocked by rate limiter")
+
+// ErrTokenRevoked indicates the connection was closed because an operator
+// revoked the token via DELETE /_admin/tokens/:name. Distinct from
+// ErrTokenExpired and ErrAuthFailed so callers can surface the right
+// remediation (provision a new token rather than refresh or retry).
+var ErrTokenRevoked = errors.New("rift: token revoked")

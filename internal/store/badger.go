@@ -145,3 +145,78 @@ func (s *BadgerStore) TokenExpiry(_ context.Context, token string) (time.Time, e
 	})
 	return expiry, err
 }
+
+// OwnerOf returns the name stored alongside token. ok is false when the
+// token is absent.
+func (s *BadgerStore) OwnerOf(_ context.Context, token string) (string, bool, error) {
+	var (
+		name string
+		ok   bool
+	)
+	err := s.db.View(func(tx *badger.Txn) error {
+		item, err := tx.Get(tokenKey(token))
+		if errors.Is(err, badger.ErrKeyNotFound) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		v, err := item.ValueCopy(nil)
+		if err != nil {
+			return err
+		}
+		name = string(v)
+		ok = true
+		return nil
+	})
+	if err != nil {
+		return "", false, err
+	}
+	return name, ok, nil
+}
+
+// Delete removes every entry under prefixToken whose value (the name) matches
+// the supplied name. The token: index is keyed by sha256(token), so we walk
+// it once and accumulate matches before deleting in a single write txn.
+// Cost is O(N) over the token set; acceptable for the realistic upper bound
+// of named tokens on a single rift server.
+func (s *BadgerStore) Delete(_ context.Context, name string) (bool, error) {
+	var keys [][]byte
+	err := s.db.View(func(tx *badger.Txn) error {
+		opts := badger.DefaultIteratorOptions
+		opts.Prefix = []byte(prefixToken)
+		it := tx.NewIterator(opts)
+		defer it.Close()
+		for it.Rewind(); it.Valid(); it.Next() {
+			item := it.Item()
+			match := false
+			if err := item.Value(func(v []byte) error {
+				if string(v) == name {
+					match = true
+				}
+				return nil
+			}); err != nil {
+				return err
+			}
+			if match {
+				keys = append(keys, item.KeyCopy(nil))
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return false, err
+	}
+	if len(keys) == 0 {
+		return false, nil
+	}
+	err = s.db.Update(func(tx *badger.Txn) error {
+		for _, k := range keys {
+			if err := tx.Delete(k); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	return err == nil, err
+}

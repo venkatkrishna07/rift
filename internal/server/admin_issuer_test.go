@@ -47,6 +47,25 @@ func (m *memTokenStore) Save(_ context.Context, key, token string) error {
 func (m *memTokenStore) TokenExpiry(context.Context, string) (time.Time, error) {
 	return time.Time{}, nil
 }
+func (m *memTokenStore) OwnerOf(_ context.Context, token string) (string, bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for name, t := range m.tokens {
+		if t == token {
+			return name, true, nil
+		}
+	}
+	return "", false, nil
+}
+func (m *memTokenStore) Delete(_ context.Context, name string) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, ok := m.tokens[name]; !ok {
+		return false, nil
+	}
+	delete(m.tokens, name)
+	return true, nil
+}
 func (m *memTokenStore) Close() error { return nil }
 
 // TestAdminIssuer_ConstantTimeCompareLengthAgnostic verifies the SHA-256

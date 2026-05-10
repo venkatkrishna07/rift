@@ -20,6 +20,8 @@ type TokenStore interface {
 	Lookup(ctx context.Context, key string) (string, error)
 	Save(ctx context.Context, key, token string) error
 	TokenExpiry(ctx context.Context, token string) (time.Time, error)
+	OwnerOf(ctx context.Context, token string) (name string, ok bool, err error)
+	Delete(ctx context.Context, name string) (deleted bool, err error)
 	Close() error
 }
 

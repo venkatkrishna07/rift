@@ -31,7 +31,13 @@ type AdminSecretIssuer struct {
 	defaultTTL time.Duration // 0 = no expiry
 	log        *zap.Logger
 	rl         *perIPLimiter
+	revokes    *RevokeRegistry // wired by Server.SetTokenIssuer; nil disables DELETE
 }
+
+// SetRevokes installs the registry used to fire revoke callbacks on
+// DELETE /_admin/tokens/:name. Server.SetTokenIssuer calls this automatically
+// for *AdminSecretIssuer values.
+func (a *AdminSecretIssuer) SetRevokes(r *RevokeRegistry) { a.revokes = r }
 
 // NewAdminSecretIssuer returns a new AdminSecretIssuer.
 // defaultTTL is applied to every token unless overridden by the ?ttl= query param; 0 = no expiry.
@@ -46,24 +52,29 @@ func NewAdminSecretIssuer(secret string, ts store.TokenStore, defaultTTL time.Du
 	}
 }
 
-// Match returns true for POST /_admin/tokens requests.
+// Match returns true for issue (POST /_admin/tokens) and revoke
+// (DELETE /_admin/tokens/:name) requests.
 func (a *AdminSecretIssuer) Match(r *http.Request) bool {
-	return r.Method == http.MethodPost && r.URL.Path == "/_admin/tokens"
+	if r.Method == http.MethodPost && r.URL.Path == "/_admin/tokens" {
+		return true
+	}
+	if r.Method == http.MethodDelete && strings.HasPrefix(r.URL.Path, "/_admin/tokens/") {
+		return true
+	}
+	return false
 }
 
-// ServeHTTP validates the bearer secret, generates a token, stores it, and
-// returns it as JSON.
+// ServeHTTP gates by IP allowlist + rate limit + bearer secret, then
+// dispatches POST → handleIssue, DELETE → handleRevoke.
 func (a *AdminSecretIssuer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	ip := clientIP(r.RemoteAddr)
 
-	// Restrict to loopback only.
 	if !isAdminAllowedIP(ip) {
 		a.log.Warn("admin endpoint access denied — IP not allowed", zap.String("ip", ip))
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
 
-	// Rate limit: 5 req/min per IP.
 	if !a.rl.Allow(ip) {
 		a.log.Warn("admin endpoint rate limited", zap.String("ip", ip))
 		http.Error(w, "too many requests", http.StatusTooManyRequests)
@@ -82,6 +93,17 @@ func (a *AdminSecretIssuer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	switch r.Method {
+	case http.MethodPost:
+		a.handleIssue(w, r)
+	case http.MethodDelete:
+		a.handleRevoke(w, r)
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func (a *AdminSecretIssuer) handleIssue(w http.ResponseWriter, r *http.Request) {
 	name := r.URL.Query().Get("name")
 	if name == "" || len(name) > 256 {
 		http.Error(w, "name must be 1–256 characters", http.StatusBadRequest)
@@ -128,6 +150,43 @@ func (a *AdminSecretIssuer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			zap.Error(err),
 		)
 	}
+}
+
+func (a *AdminSecretIssuer) handleRevoke(w http.ResponseWriter, r *http.Request) {
+	name := strings.TrimPrefix(r.URL.Path, "/_admin/tokens/")
+	if name == "" || strings.Contains(name, "/") || len(name) > 256 {
+		http.Error(w, "name must be 1–256 characters and contain no slashes", http.StatusBadRequest)
+		return
+	}
+
+	deleted, err := a.ts.Delete(r.Context(), name)
+	if err != nil {
+		a.log.Error("delete token", zap.String("name", name), zap.Error(err))
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+
+	killed := 0
+	if a.revokes != nil {
+		killed = a.revokes.Revoke(name)
+	}
+
+	if !deleted && killed == 0 {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+
+	a.log.Info("token revoked",
+		zap.String("name", name),
+		zap.Bool("deleted", deleted),
+		zap.Int("killed", killed),
+	)
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(struct {
+		Name    string `json:"name"`
+		Deleted bool   `json:"deleted"`
+		Killed  int    `json:"killed"`
+	}{Name: name, Deleted: deleted, Killed: killed})
 }
 
 // isAdminAllowedIP returns true if ip is a loopback address.

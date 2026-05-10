@@ -27,3 +27,9 @@ var ErrTokenExpired = server.ErrTokenExpired
 // the source IP exceeded its allowed failed-auth count and is now blocked
 // by the rate limiter.
 var ErrIPBlocked = server.ErrIPBlocked
+
+// ErrTokenRevoked is returned when an authenticated connection is closed
+// because an operator revoked the token via the admin revoke endpoint.
+// Distinct from ErrTokenExpired so callers can surface the right action —
+// a new token must be provisioned, refreshing the same token will not work.
+var ErrTokenRevoked = server.ErrTokenRevoked

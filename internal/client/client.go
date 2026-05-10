@@ -139,21 +139,23 @@ func (c *Client) Connect(ctx context.Context) error {
 //
 //	2 — auth failed or rate limited (IP blocked due to repeated failures)
 //	3 — token expired
+//	4 — token revoked
 //
 // Also returns true for ErrMCPNotCompiled — the binary lacks MCP support and
 // retrying will not fix the missing dependency.
 func isPermanentError(err error) bool {
 	var appErr *quic.ApplicationError
 	if errors.As(err, &appErr) {
-		return appErr.ErrorCode == 2 || appErr.ErrorCode == 3
+		return appErr.ErrorCode == 2 || appErr.ErrorCode == 3 || appErr.ErrorCode == 4
 	}
 	return errors.Is(err, ErrMCPNotCompiled)
 }
 
 // wrapPermanent maps a permanent-failure error to the public sentinel that
 // the rift package exposes. Auth/IP-block path uses code 2 and surfaces as
-// ErrAuthFailed; token-expiry uses code 3 and surfaces as ErrTokenExpired.
-// Other errors (e.g. ErrMCPNotCompiled) pass through unchanged.
+// ErrAuthFailed; token-expiry uses code 3 and surfaces as ErrTokenExpired;
+// token-revoked uses code 4 and surfaces as ErrTokenRevoked. Other errors
+// (e.g. ErrMCPNotCompiled) pass through unchanged.
 func wrapPermanent(err error) error {
 	var appErr *quic.ApplicationError
 	if errors.As(err, &appErr) {
@@ -162,6 +164,8 @@ func wrapPermanent(err error) error {
 			return fmt.Errorf("%w: %w", server.ErrAuthFailed, err)
 		case 3:
 			return fmt.Errorf("%w: %w", server.ErrTokenExpired, err)
+		case 4:
+			return fmt.Errorf("%w: %w", server.ErrTokenRevoked, err)
 		}
 	}
 	return err

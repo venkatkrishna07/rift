@@ -22,7 +22,9 @@ func (stubTokenStore) Save(context.Context, string, string) error               
 func (stubTokenStore) TokenExpiry(context.Context, string) (time.Time, error) {
 	return time.Time{}, nil
 }
-func (stubTokenStore) Close() error { return nil }
+func (stubTokenStore) OwnerOf(context.Context, string) (string, bool, error) { return "", false, nil }
+func (stubTokenStore) Delete(context.Context, string) (bool, error)          { return false, nil }
+func (stubTokenStore) Close() error                                          { return nil }
 
 // stubTokenIssuer satisfies rift.TokenIssuer.
 type stubTokenIssuer struct{}

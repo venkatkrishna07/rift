@@ -127,6 +127,7 @@ type connHandler struct {
 	conn          *quic.Conn
 	ts            store.TokenStore // nil in dev mode
 	reg           *Registry
+	revokes       *RevokeRegistry // nil in dev mode
 	dev           bool
 	domain        string
 	workers       *worker.Group
@@ -196,8 +197,8 @@ func (h *connHandler) run(ctx context.Context) {
 			h.log.Info("auth attempt", zap.String("ip", ip))
 			// Log token prefix only (never the full token).
 			tokenHint := tokenPrefix(msg.Token)
-			ok, err := h.ts.Validate(ctx, msg.Token)
-			if err != nil || !ok {
+			name, found, err := h.ts.OwnerOf(ctx, msg.Token)
+			if err != nil || !found {
 				blocked := h.rl.RecordFailure(ip)
 				h.log.Warn("auth rejected",
 					zap.String("ip", ip),
@@ -207,6 +208,24 @@ func (h *connHandler) run(ctx context.Context) {
 				)
 				_ = proto.WriteMsg(ctrl, &proto.ControlMsg{Type: proto.TypeError, Error: "invalid token"})
 				_ = h.conn.CloseWithError(2, "auth failed")
+				return
+			}
+
+			// Register a revoke callback before sending TypeAuthOK, then
+			// re-check that the token still exists. This three-step pattern
+			// closes the race where Delete fires between OwnerOf and Register.
+			unregister := h.revokes.Register(name, func() {
+				_ = h.conn.CloseWithError(4, "token revoked")
+			})
+			defer unregister()
+
+			if _, stillFound, _ := h.ts.OwnerOf(ctx, msg.Token); !stillFound {
+				unregister()
+				h.log.Info("token revoked during auth",
+					zap.String("ip", ip),
+					zap.String("token_prefix", tokenHint),
+				)
+				_ = h.conn.CloseWithError(4, "token revoked")
 				return
 			}
 

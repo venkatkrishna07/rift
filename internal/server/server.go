@@ -27,6 +27,7 @@ type Server struct {
 	cfg         config.ServerConfig
 	ts          store.TokenStore // nil in dev mode
 	reg         *Registry
+	revokes     *RevokeRegistry
 	tlsCfg      *tls.Config
 	acmeHandler http.Handler // non-nil in prod mode; serves HTTP-01 ACME challenges on :80
 	log         *zap.Logger
@@ -61,6 +62,7 @@ func New(cfg config.ServerConfig, ts store.TokenStore, tlsCfg *tls.Config, acmeH
 		cfg:         cfg,
 		ts:          ts,
 		reg:         NewRegistry(cfg.EffectiveTCPPortMin(), cfg.EffectiveTCPPortMax()),
+		revokes:     NewRevokeRegistry(),
 		tlsCfg:      tlsCfg,
 		acmeHandler: acmeHandler,
 		log:         l,
@@ -69,6 +71,10 @@ func New(cfg config.ServerConfig, ts store.TokenStore, tlsCfg *tls.Config, acmeH
 		connByIP:    make(map[string]int),
 	}
 }
+
+// Revokes returns the revocation registry. The admin handler uses this to
+// fire revoke callbacks for connections currently using a deleted token.
+func (s *Server) Revokes() *RevokeRegistry { return s.revokes }
 
 // Run starts the QUIC listener and HTTPS server, blocks until ctx is cancelled.
 func (s *Server) Run(ctx context.Context) error {
@@ -201,10 +207,16 @@ func (s *Server) Addr() net.Addr {
 // SetTokenIssuer stores the issuer that will be served before tunnel routing
 // once Run starts the HTTPS listener. Must be called before Run; later calls
 // take effect on the next Run cycle.
+//
+// When iss is an *AdminSecretIssuer, the server's revoke registry is wired
+// into it so DELETE /_admin/tokens/:name fires active-connection callbacks.
 func (s *Server) SetTokenIssuer(iss TokenIssuer) {
 	s.issuerMu.Lock()
 	s.issuer = iss
 	s.issuerMu.Unlock()
+	if a, ok := iss.(*AdminSecretIssuer); ok {
+		a.SetRevokes(s.revokes)
+	}
 }
 
 func (s *Server) tokenIssuer() TokenIssuer {
@@ -248,6 +260,7 @@ func (s *Server) acceptLoop(ctx context.Context, ln *quic.Listener) error {
 			conn:          conn,
 			ts:            s.ts,
 			reg:           s.reg,
+			revokes:       s.revokes,
 			dev:           s.cfg.Dev,
 			domain:        s.cfg.Domain,
 			workers:       s.wg,
