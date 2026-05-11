@@ -4,7 +4,7 @@
 
 **A self-hosted tunnel for local development. One binary, one VPS, no accounts.**
 
-Expose localhost to the internet over a single QUIC connection — on infrastructure you fully own. Built for sharing dev servers, testing webhooks, and demoing work in progress.
+Expose localhost to the internet over a single QUIC connection — on infrastructure you fully own. Built for sharing dev servers, testing webhooks, demoing work in progress, and reaching browser-native services over **WebTransport**.
 
 [![Go Version](https://img.shields.io/badge/go-1.22+-00ADD8?logo=go)](https://go.dev) [![Go Reference](https://pkg.go.dev/badge/github.com/venkatkrishna07/rift.svg)](https://pkg.go.dev/github.com/venkatkrishna07/rift) [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
@@ -13,7 +13,8 @@ Expose localhost to the internet over a single QUIC connection — on infrastruc
 ```
   localhost:3000  ──── QUIC ────▶  https://myapp.tunnel.example.com
   localhost:5432  ──── QUIC ────▶  tunnel.example.com:10247
-  localhost:9090  ──── QUIC ────▶  mcp.example.com (MCP server)
+  localhost:9090  ──── QUIC ────▶  mcp.example.com         (MCP server)
+  localhost:4000  ──── QUIC ────▶  https://game.tunnel.example.com  (WebTransport)
 ```
 
 Two ways to use it:
@@ -35,7 +36,7 @@ That's it. Your local dev server is now reachable on the internet, over HTTPS, t
 
 ## Where rift fits
 
-Self-hosted tunnels already exist — [frp](https://github.com/fatedier/frp), [bore](https://github.com/ekzhang/bore), [chisel](https://github.com/jpillora/chisel). They all ride on TCP. rift is the same idea, but built on QUIC, which gives you three things you can't get over TCP:
+Self-hosted tunnels already exist — [frp](https://github.com/fatedier/frp), [bore](https://github.com/ekzhang/bore), [chisel](https://github.com/jpillora/chisel). Most ride on TCP by default; frp has supported QUIC as an opt-in transport since v0.50. rift is built **QUIC-first** — there is no TCP fallback for the control or data plane — and that focus is what gives you three things you do not get over TCP:
 
 - **No head-of-line blocking between tunnels.** On TCP, a lost packet on one multiplexed stream stalls every other stream on the same connection until it's retransmitted. QUIC isolates streams, so a hiccup on your API tunnel doesn't freeze your database tunnel.
 - **Connection migration.** Switch from Wi-Fi to a hotspot, toggle your VPN, change networks mid-session — the QUIC connection survives without reconnecting or re-authenticating.
@@ -49,10 +50,11 @@ If your network blocks UDP/443 (some corporate and café networks do), TCP-based
 |---|:---:|:---:|:---:|:---:|:---:|
 | Self-hosted | ✅ | ❌ | ❌ | ✅ | ✅ |
 | No account required | ✅ | ❌ | ❌¹ | ✅ | ✅ |
-| Transport | QUIC | HTTP/2 | QUIC | TCP | TCP |
+| Transport | QUIC | HTTP/2 | QUIC | TCP / QUIC / KCP / WSS | TCP |
 | HTTP + subdomains | ✅ | ✅² | ✅ | ✅ | ❌ |
 | TCP tunnels | ✅ | ✅ | ✅ | ✅ | ✅ |
 | MCP tunnels | ✅ | ❌ | ❌ | ❌ | ❌ |
+| WebTransport tunnels | ✅ | ❌ | ❌ | ❌ | ❌ |
 | UDP tunnels | ⏳³ | ❌ | ❌ | ✅ | ❌ |
 | WebSockets | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Auto TLS (Let's Encrypt) | ✅ | managed | managed | manual | ❌ |
@@ -75,6 +77,11 @@ rift server --dev --listen :4443
 ```bash
 rift client --server localhost:4443 --insecure --expose 3000:http:myapp
 # → https://myapp.tunnel.localhost
+
+# or a WebTransport tunnel:
+rift client --server localhost:4443 --insecure \
+  --expose 4000:wt:game --wt-allow-origin '*'
+# → https://game.tunnel.localhost  (HTTP/3, opened with new WebTransport(url))
 ```
 
 To go public, swap `--dev` for a real domain and move the server to a VPS. See [Setup](#setup).
@@ -125,9 +132,14 @@ func main() {
 
 ```go
 cli, err := rift.NewClient(rift.ClientConfig{
-    Server:   "tunnel.example.com:443",
-    Token:    "rift_xxx",
-    Tunnels:  []rift.TunnelSpec{{LocalPort: 3000, Proto: rift.ProtoHTTP, Name: "app"}},
+    Server: "tunnel.example.com:443",
+    Token:  "rift_xxx",
+    Tunnels: []rift.TunnelSpec{
+        {LocalPort: 3000, Proto: rift.ProtoHTTP, Name: "app"},
+        {LocalPort: 5432, Proto: rift.ProtoTCP},
+        {LocalPort: 4000, Proto: rift.ProtoWT, Name: "game",
+            AllowedOrigins: []string{"https://app.example.com"}},
+    },
     Protocol: rift.ProtocolRift,
 })
 if err != nil { log.Fatal(err) }
@@ -142,7 +154,8 @@ if err := cli.Connect(context.Background()); err != nil {
 
 - Functional options on both constructors — forward-compatible API.
 - `Logger` interface (slog-shaped). Pass `rift.SlogAdapter(*slog.Logger)`, `rift.NopLogger()`, or any custom impl. No zap dep forced on consumers.
-- Sentinel errors at the boundary — `errors.Is(err, rift.ErrAuthFailed)`, `ErrTokenExpired`, `ErrIPBlocked`, `ErrSubdomainTaken`, `ErrPortsExhausted`.
+- Sentinel errors at the boundary — `errors.Is(err, rift.ErrAuthFailed)`, `ErrTokenExpired`, `ErrTokenRevoked`, `ErrIPBlocked`, `ErrSubdomainTaken`, `ErrPortsExhausted`.
+- Three tunnel shapes: `ProtoHTTP` (subdomain reverse-proxy), `ProtoTCP` (raw bytes on a port), `ProtoWT` (WebTransport bidi streams on a subdomain). Browser visitors hit `ProtoWT` tunnels via `new WebTransport(url)`.
 - `(*Server).Shutdown(ctx)` and `(*Client).Close()` for graceful lifecycle. `Server.Addr()` exposes the bound UDP address (useful with `:0`).
 - TokenStore interface with a Badger implementation: `rift.OpenBadgerStore(path, log)`. Provision tokens via `rift.NewAdminSecretIssuer(...)` mounted with `rift.WithTokenIssuer(...)`.
 - Single-use semantics: construct a fresh `Server`/`Client` per lifecycle.
@@ -278,7 +291,48 @@ The server's TCP port range is configurable via `--tcp-port-min` and `--tcp-port
 
 > TCP tunnels relay raw bytes — there's no visitor authentication at the tunnel layer. Use your application's own auth or restrict access at the firewall.
 
-Blocked local ports (to prevent accidental SMTP relay and similar): `25, 53, 135, 139, 445, 465, 587, 3389`.
+Blocked local ports (to prevent accidental exposure of SSH / DBs / admin
+services): `22, 23, 25, 53, 135, 139, 445, 465, 587, 1433, 1434, 3306, 3389,
+5432, 6379, 9200, 11211, 27017`. Any port below `1024` is also refused
+unless the operator opts in with `WithAllowLowLocalPorts(true)` (or
+`RIFT_UNSAFE_TCP_PORT=yes`).
+
+## WebTransport tunnels
+
+Expose a local TCP service as a WebTransport endpoint so browsers (Chrome,
+Firefox, Zen) can open bidirectional QUIC streams to it from JavaScript via
+`new WebTransport(url)`. Each visitor bidi stream is spliced 1:1 onto a
+fresh TCP connection on the client.
+
+```bash
+rift client --server tunnel.example.com \
+  --expose 3000:wt:game \
+  --wt-allow-origin 'https://app.example.com'
+# → https://game.tunnel.example.com   (HTTP/3 over UDP/443)
+```
+
+Browser side:
+
+```javascript
+const wt = new WebTransport('https://game.tunnel.example.com/');
+await wt.ready;
+const stream = await wt.createBidirectionalStream();
+const writer = stream.writable.getWriter();
+await writer.write(new TextEncoder().encode('hello'));
+```
+
+Cross-origin defaults to **deny**. Pass `--wt-allow-origin <origin>`
+(repeatable) for an exact-match allow-list, or `'*'` for any origin. Empty
+Origin (non-browser clients) is always allowed.
+
+Visitor traffic uses HTTP/3 over UDP/443 alongside the existing rift
+control protocol — no additional ports to open. v0.1.0 supports bidi
+streams; uni-streams and WT datagrams are on the v0.2 roadmap.
+
+> Browser caveats: Chrome ≥97 and Firefox ≥114 ship WebTransport. Safari
+> ships it in Technology Preview only. Self-signed certificates require
+> `--ignore-certificate-errors-spki-list=<sha256-spki>` on Chrome or a
+> trusted local CA (e.g. `mkcert`) for Firefox.
 
 ## WebSockets
 
@@ -313,14 +367,20 @@ Proxied transparently through HTTP tunnels. No extra configuration needed.
 | `--config` | — | Path to TOML config file (or `$RIFT_CONFIG`) |
 | `--server` | — | Server host or host:port **(required)** |
 | `--expose` | — | `PORT:PROTO[:NAME]` — repeatable **(required)** |
+| `--wt-allow-origin` | — | Origin allow-list applied to every WT tunnel; `*` for any. Repeatable |
 | `--token` | — | Auth token (overrides DB lookup) |
 | `--protocol` | `rift` | Wire protocol: `rift` or `mcp` |
 | `--db` | `~/.local/share/rift` | Local token store |
 | `--stream-timeout` | `5m` | Idle stream timeout |
+| `--shutdown-timeout` | `10s` | Max time to wait for graceful client shutdown |
 | `--insecure` | — | Skip TLS verification (dev server only) |
 | `--force-insecure` | — | Allow `--insecure` for non-localhost servers (also requires `RIFT_FORCE_INSECURE=yes`) |
 
-`--expose` format: `PORT:http`, `PORT:tcp`, `PORT:http:name` for a fixed subdomain, or `PORT:http:tunnel-name` with `--protocol mcp`.
+`--expose` format:
+- `PORT:http` / `PORT:http:name` — HTTP reverse-proxied through a subdomain
+- `PORT:tcp` — raw TCP on a randomly-allocated port
+- `PORT:wt` / `PORT:wt:name` — WebTransport bidi streams on a subdomain
+- `PORT:mcp:name` (with `--protocol mcp`) — MCP server
 
 ### `/_admin/tokens` API
 

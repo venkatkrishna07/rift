@@ -26,3 +26,12 @@ proto      = "tcp"
 local-port = 9090
 proto      = "mcp"
 name       = "tools"
+
+# WebTransport tunnel — bidi streams to a local TCP service, reachable by
+# browsers via `new WebTransport("https://game.tunnel.example.com/")`.
+# Empty allowed-origins rejects every cross-origin request; "*" matches any.
+[[tunnels]]
+local-port      = 4000
+proto           = "wt"
+name            = "game"
+allowed-origins = ["https://app.example.com"]
