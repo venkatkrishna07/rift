@@ -27,7 +27,44 @@ const (
 // ProtocolVersion is the rift wire-protocol version this binary speaks. Sent
 // in the Hello frame at the start of every control stream so future clients
 // and servers can negotiate features without bumping the ALPN.
-const ProtocolVersion = 1
+//
+// Version policy:
+//
+//   - ALPN ("rift-v1") changes when the framing-level invariants break
+//     and the two sides cannot meaningfully communicate. Bump rarely.
+//   - ProtocolVersion changes when the semantics of an existing field or
+//     frame change in a way an older peer would misinterpret.
+//   - Capabilities (the Hello ControlMsg's Capabilities field) carry
+//     additive features. A peer that does not understand a capability
+//     simply does not use it; this is the preferred extension path.
+const ProtocolVersion = 2
+
+// Capability names exchanged in the Hello frame. New capabilities should
+// be added here and gated at the call site via a helper like
+// `HasCapability(caps, CapWTDgramV2)`.
+const (
+	// CapWTDgramV2 advertises the v2 WT datagram wire envelope:
+	// [tunnelID:4][sessionID:4][payload]. Required for per-session
+	// routing; absence means the peer only understands the v1 envelope
+	// [tunnelID:4][payload], which is incompatible with v0.1.1+ servers.
+	CapWTDgramV2 = "wt.dgram.v2"
+)
+
+// DefaultCapabilities is the capability set this binary advertises in
+// Hello. Keep small; add a capability only when its absence would change
+// peer behaviour.
+var DefaultCapabilities = []string{CapWTDgramV2}
+
+// HasCapability reports whether caps contains name. Linear scan because
+// capability lists are tiny in practice (single-digit entries).
+func HasCapability(caps []string, name string) bool {
+	for _, c := range caps {
+		if c == name {
+			return true
+		}
+	}
+	return false
+}
 
 // Proto identifies the tunnel protocol.
 const (
@@ -60,6 +97,10 @@ type ControlMsg struct {
 	// Empty means deny all cross-origin requests. Exact-match comparison.
 	// "*" is accepted as an explicit any-origin escape hatch.
 	AllowedOrigins []string `json:"allowed_origins,omitempty"`
+	// AllowedWTProtocols lists WebTransport subprotocols the WT tunnel is
+	// willing to negotiate; rift echoes the chosen value via WT-Protocol.
+	// Empty accepts whatever the browser sends (or none).
+	AllowedWTProtocols []string `json:"allowed_wt_protocols,omitempty"`
 }
 
 // RedactToken returns the first 8 characters of token followed by "..." for

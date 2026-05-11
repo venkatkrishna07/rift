@@ -239,6 +239,9 @@ func runClient(args []string, log *zap.Logger) error {
 	fs.Var(&exposeFlags, "expose", "PORT:PROTO[:NAME], e.g. 3000:http:myapp (repeatable)")
 	var wtOriginFlags multiFlag
 	fs.Var(&wtOriginFlags, "wt-allow-origin", "Origin allow-list applied to every WT tunnel from --expose. Use \"*\" for any origin. Repeatable.")
+	wtDatagramPort := fs.Uint("wt-datagram-port", 0, "Local UDP port for WT datagrams (applied to every WT tunnel from --expose; 0 disables datagrams).")
+	var wtProtoFlags multiFlag
+	fs.Var(&wtProtoFlags, "wt-protocol", "Allowed WebTransport subprotocol name (applied to every WT tunnel from --expose). Repeatable.")
 	_ = fs.Parse(args)
 	if *forceInsecure && os.Getenv("RIFT_FORCE_INSECURE") != "yes" {
 		return fmt.Errorf(
@@ -255,6 +258,12 @@ func runClient(args []string, log *zap.Logger) error {
 		}
 		if spec.Proto == rift.ProtoWT && len(wtOriginFlags) > 0 {
 			spec.AllowedOrigins = append([]string(nil), wtOriginFlags...)
+		}
+		if spec.Proto == rift.ProtoWT && *wtDatagramPort > 0 {
+			spec.DatagramLocalPort = uint16(*wtDatagramPort)
+		}
+		if spec.Proto == rift.ProtoWT && len(wtProtoFlags) > 0 {
+			spec.AllowedWTProtocols = append([]string(nil), wtProtoFlags...)
 		}
 		specs = append(specs, spec)
 	}
@@ -445,10 +454,12 @@ func applyClientFile(
 			return fmt.Errorf("tunnels[%d]: unknown proto %q", i, t.Proto)
 		}
 		*specs = append(*specs, rift.TunnelSpec{
-			LocalPort:      t.LocalPort,
-			Proto:          t.Proto,
-			Name:           t.Name,
-			AllowedOrigins: append([]string(nil), t.AllowedOrigins...),
+			LocalPort:          t.LocalPort,
+			DatagramLocalPort:  t.DatagramLocalPort,
+			Proto:              t.Proto,
+			Name:               t.Name,
+			AllowedOrigins:     append([]string(nil), t.AllowedOrigins...),
+			AllowedWTProtocols: append([]string(nil), t.AllowedWTProtocols...),
 		})
 	}
 	return nil

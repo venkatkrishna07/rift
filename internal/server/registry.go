@@ -33,14 +33,25 @@ const DefaultMaxVisitorsPerTunnel int64 = 50
 
 // Tunnel holds the metadata for a registered tunnel.
 type Tunnel struct {
-	ID             uint32
-	Subdomain      string // set for HTTP tunnels
-	Port           uint16 // set for TCP tunnels
-	Proto          string // "http", "tcp", or "wt"
-	Conn           *quic.Conn
-	AllowedOrigins []string // WT tunnels: permitted Origin header values; "*" = any
-	maxVisitors    int64
-	visitors       atomic.Int64
+	ID                 uint32
+	Subdomain          string // set for HTTP tunnels
+	Port               uint16 // set for TCP tunnels
+	Proto              string // "http", "tcp", or "wt"
+	Conn               *quic.Conn
+	AllowedOrigins     []string // WT tunnels: permitted Origin header values; "*" = any
+	AllowedWTProtocols []string // WT tunnels: subprotocols echoed via WT-Protocol; empty = accept any
+	maxVisitors        int64
+	visitors           atomic.Int64
+
+	// Active WebTransport sessions on this tunnel, keyed by a per-session
+	// uint32 ID stamped into the datagram wire envelope so the client side
+	// can route each visitor's datagrams onto a distinct local UDP source
+	// port (1:1 instead of 1:N broadcast). The plain map + RWMutex pair is
+	// clearer than a sync.Map here because access is exclusively point
+	// lookups (no Range) and add/remove rate is comparable to read rate.
+	sessMu        sync.RWMutex
+	wtSessions    map[uint32]any
+	nextSessionID atomic.Uint32 // monotonically allocated session IDs; zero is reserved
 }
 
 // TryAddVisitor increments the visitor count if below the per-tunnel cap.
@@ -61,15 +72,73 @@ func (t *Tunnel) TryAddVisitor() bool {
 // successful TryAddVisitor call, typically via defer.
 func (t *Tunnel) VisitorDone() { t.visitors.Add(-1) }
 
-// OpenDataStream opens a QUIC stream on the rift-client side of the tunnel.
-// Returns ErrTunnelGone if the underlying connection has already been closed
-// — callers should treat this as a recoverable "tunnel unregistered" case
-// rather than a generic stream-open failure.
+// AddWTSession registers an active WebTransport session against the tunnel
+// and returns the allocated session ID. The ID is non-zero, unique within
+// the tunnel for the lifetime of this Server.Run, and carried in the
+// datagram wire envelope so client-side routing is 1:1.
+func (t *Tunnel) AddWTSession(s any) uint32 {
+	for {
+		id := t.nextSessionID.Add(1)
+		if id == 0 {
+			continue // skip zero (reserved)
+		}
+		t.sessMu.Lock()
+		if t.wtSessions == nil {
+			t.wtSessions = make(map[uint32]any)
+		}
+		if _, exists := t.wtSessions[id]; exists {
+			t.sessMu.Unlock()
+			continue // collision after 2^32 sessions — keep trying
+		}
+		t.wtSessions[id] = s
+		t.sessMu.Unlock()
+		return id
+	}
+}
+
+// RemoveWTSession removes a previously registered WT session by ID.
+func (t *Tunnel) RemoveWTSession(id uint32) {
+	t.sessMu.Lock()
+	delete(t.wtSessions, id)
+	t.sessMu.Unlock()
+}
+
+// GetWTSession returns the session previously registered under id, or nil
+// if no session exists with that ID.
+func (t *Tunnel) GetWTSession(id uint32) any {
+	t.sessMu.RLock()
+	v := t.wtSessions[id]
+	t.sessMu.RUnlock()
+	return v
+}
+
+// OpenDataStream opens a QUIC bidi stream on the rift-client side of the
+// tunnel. Returns ErrTunnelGone if the underlying connection has already
+// been closed — callers should treat this as a recoverable "tunnel
+// unregistered" case rather than a generic stream-open failure.
 func (t *Tunnel) OpenDataStream(ctx context.Context) (*quic.Stream, error) {
 	if err := t.Conn.Context().Err(); err != nil {
 		return nil, ErrTunnelGone
 	}
 	stream, err := t.Conn.OpenStreamSync(ctx)
+	if err != nil {
+		if errors.Is(t.Conn.Context().Err(), context.Canceled) {
+			return nil, ErrTunnelGone
+		}
+		return nil, err
+	}
+	return stream, nil
+}
+
+// OpenDataUniStream opens a QUIC unidirectional stream from the server to
+// the rift client. Used for WebTransport uni-streams from visitors: the
+// visitor writes bytes the local service should receive, with no return
+// path. Returns ErrTunnelGone when the connection is already closed.
+func (t *Tunnel) OpenDataUniStream(ctx context.Context) (*quic.SendStream, error) {
+	if err := t.Conn.Context().Err(); err != nil {
+		return nil, ErrTunnelGone
+	}
+	stream, err := t.Conn.OpenUniStreamSync(ctx)
 	if err != nil {
 		if errors.Is(t.Conn.Context().Err(), context.Canceled) {
 			return nil, ErrTunnelGone
@@ -127,20 +196,22 @@ func (r *Registry) RegisterHTTP(subdomain string, conn *quic.Conn) (*Tunnel, err
 // RegisterWT registers a WebTransport tunnel under subdomain. Shares the
 // subdomain namespace with HTTP tunnels — ErrSubdomainTaken on collision.
 // allowedOrigins is the per-tunnel cross-origin allow-list; empty means
-// reject all cross-origin requests, "*" matches any.
-func (r *Registry) RegisterWT(subdomain string, conn *quic.Conn, allowedOrigins []string) (*Tunnel, error) {
+// reject all cross-origin requests, "*" matches any. allowedWTProtocols
+// is the optional subprotocol allow-list echoed via WT-Protocol.
+func (r *Registry) RegisterWT(subdomain string, conn *quic.Conn, allowedOrigins, allowedWTProtocols []string) (*Tunnel, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if _, exists := r.bySubdom[subdomain]; exists {
 		return nil, ErrSubdomainTaken
 	}
 	t := &Tunnel{
-		ID:             r.nextID(),
-		Subdomain:      subdomain,
-		Proto:          proto.ProtoWT,
-		Conn:           conn,
-		AllowedOrigins: append([]string(nil), allowedOrigins...),
-		maxVisitors:    r.maxVisitors,
+		ID:                 r.nextID(),
+		Subdomain:          subdomain,
+		Proto:              proto.ProtoWT,
+		Conn:               conn,
+		AllowedOrigins:     append([]string(nil), allowedOrigins...),
+		AllowedWTProtocols: append([]string(nil), allowedWTProtocols...),
+		maxVisitors:        r.maxVisitors,
 	}
 	r.byID[t.ID] = t
 	r.bySubdom[subdomain] = t

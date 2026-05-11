@@ -326,8 +326,41 @@ Cross-origin defaults to **deny**. Pass `--wt-allow-origin <origin>`
 Origin (non-browser clients) is always allowed.
 
 Visitor traffic uses HTTP/3 over UDP/443 alongside the existing rift
-control protocol — no additional ports to open. v0.1.0 supports bidi
-streams; uni-streams and WT datagrams are on the v0.2 roadmap.
+control protocol — no additional ports to open. Bidi streams,
+unidirectional streams, and unreliable datagrams all flow end-to-end.
+
+> **Datagram payload size.** The wire envelope adds 8 bytes
+> (`[tunnelID:4][sessionID:4]`) so a visitor's WT datagram has roughly
+> 1192 bytes of usable payload on a typical 1500-byte MTU. Size your
+> game / streaming frames with that overhead in mind.
+
+> **Visitor-side authentication.** rift does not authenticate WT
+> visitors at the tunnel layer. Use your own application-level auth
+> inside the WT session, and the per-tunnel `AllowedOrigins` allow-list
+> for browser-CSRF defence.
+
+> **Resource caps.** WT tunnels honour the per-tunnel
+> `MaxVisitorsPerTunnel` cap (default 50) and an additional per-source-IP
+> cap of 20 concurrent WT sessions. Excess sessions are rejected with
+> 503 / 429.
+
+Blocked local UDP ports for WT datagram targets (mirrors the TCP
+blocklist): `53, 67, 68, 123, 137, 138, 161, 162, 500, 514, 520, 1900,
+5353`. Override with `WithAllowLowLocalPorts(true)` only when you mean
+to publish a privileged service.
+
+WT datagrams forward to a separate local **UDP** port — point your
+game/streaming service at that port and pass it via `--wt-datagram-port`
+(or `datagram-local-port` in TOML):
+
+```bash
+rift client --server tunnel.example.com \
+  --expose 3000:wt:game \
+  --wt-datagram-port 9090 \
+  --wt-allow-origin 'https://app.example.com'
+# bidi streams → localhost:3000/tcp
+# datagrams    → localhost:9090/udp
+```
 
 > Browser caveats: Chrome ≥97 and Firefox ≥114 ship WebTransport. Safari
 > ships it in Technology Preview only. Self-signed certificates require
@@ -368,6 +401,8 @@ Proxied transparently through HTTP tunnels. No extra configuration needed.
 | `--server` | — | Server host or host:port **(required)** |
 | `--expose` | — | `PORT:PROTO[:NAME]` — repeatable **(required)** |
 | `--wt-allow-origin` | — | Origin allow-list applied to every WT tunnel; `*` for any. Repeatable |
+| `--wt-datagram-port` | `0` | Local UDP port for WT datagrams; applied to every WT tunnel from `--expose`. `0` disables datagrams |
+| `--wt-protocol` | — | Allowed WebTransport subprotocol; echoed via `WT-Protocol` response header. Repeatable |
 | `--token` | — | Auth token (overrides DB lookup) |
 | `--protocol` | `rift` | Wire protocol: `rift` or `mcp` |
 | `--db` | `~/.local/share/rift` | Local token store |

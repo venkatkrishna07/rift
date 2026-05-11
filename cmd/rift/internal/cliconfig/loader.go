@@ -52,10 +52,12 @@ type FileClientSection struct {
 }
 
 type FileTunnel struct {
-	LocalPort      uint16   `toml:"local-port"`
-	Proto          string   `toml:"proto"`
-	Name           string   `toml:"name"`
-	AllowedOrigins []string `toml:"allowed-origins"`
+	LocalPort          uint16   `toml:"local-port"`
+	DatagramLocalPort  uint16   `toml:"datagram-local-port"`
+	Proto              string   `toml:"proto"`
+	Name               string   `toml:"name"`
+	AllowedOrigins     []string `toml:"allowed-origins"`
+	AllowedWTProtocols []string `toml:"allowed-wt-protocols"`
 }
 
 // ResolveConfigPath returns the path to load. Precedence: --config flag,

@@ -128,8 +128,10 @@ func (c ClientConfig) EffectiveStreamTimeout() time.Duration {
 
 // TunnelSpec describes a single tunnel the client wants to expose.
 type TunnelSpec struct {
-	LocalPort      uint16   // local TCP port to forward to
-	Proto          string   // "http", "tcp", or "wt"
-	Name           string   // optional human name; server picks subdomain/port if empty
-	AllowedOrigins []string // WT only: cross-origin allow-list ("*" = any, empty = same-origin only)
+	LocalPort           uint16   // local TCP port to forward to
+	DatagramLocalPort   uint16   // WT only: local UDP port for WT datagrams; 0 disables datagrams
+	Proto               string   // "http", "tcp", or "wt"
+	Name                string   // optional human name; server picks subdomain/port if empty
+	AllowedOrigins      []string // WT only: cross-origin allow-list ("*" = any, empty = same-origin only)
+	AllowedWTProtocols  []string // WT only: subprotocol allow-list echoed via WT-Protocol; empty = accept any
 }

@@ -4,6 +4,7 @@ package client
 import (
 	"context"
 	"crypto/tls"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"net"
@@ -207,6 +208,10 @@ func (c *Client) connect(ctx context.Context) error {
 		MaxIdleTimeout:  30 * time.Second,
 		KeepAlivePeriod: 15 * time.Second,
 		Allow0RTT:       false, // server rejects 0-RTT; auth is always sent after 1-RTT handshake
+		// Datagrams carry WebTransport datagram payloads — they share the
+		// rift-v1 control connection prefixed with a 4-byte tunnel ID.
+		// Both sides must enable them at handshake time.
+		EnableDatagrams: true,
 	})
 	if err != nil {
 		return fmt.Errorf("dial %s: %w", addr, err)
@@ -228,10 +233,12 @@ func (c *Client) connect(ctx context.Context) error {
 	}
 
 	// Hello first so the server can reject unknown protocol versions before
-	// any token is sent.
+	// any token is sent. Advertise our capability set so the server can
+	// gate optional features (e.g. v2 WT datagram envelope).
 	if err := proto.WriteMsg(ctrl, &proto.ControlMsg{
-		Type:    proto.TypeHello,
-		Version: proto.ProtocolVersion,
+		Type:         proto.TypeHello,
+		Version:      proto.ProtocolVersion,
+		Capabilities: proto.DefaultCapabilities,
 	}); err != nil {
 		return fmt.Errorf("send hello: %w", err)
 	}
@@ -266,13 +273,16 @@ func (c *Client) connect(ctx context.Context) error {
 	c.log.Info("authenticated")
 
 	tunnelMap := make(map[uint32]config.TunnelSpec, len(c.cfg.Tunnels))
+	dgramRouter := newDatagramRouter(c.log)
+	defer dgramRouter.Close()
 	for _, spec := range c.cfg.Tunnels {
 		if err := proto.WriteMsg(ctrl, &proto.ControlMsg{
-			Type:           proto.TypeRegister,
-			Port:           spec.LocalPort,
-			Proto:          spec.Proto,
-			Name:           spec.Name,
-			AllowedOrigins: spec.AllowedOrigins,
+			Type:               proto.TypeRegister,
+			Port:               spec.LocalPort,
+			Proto:              spec.Proto,
+			Name:               spec.Name,
+			AllowedOrigins:     spec.AllowedOrigins,
+			AllowedWTProtocols: spec.AllowedWTProtocols,
 		}); err != nil {
 			return fmt.Errorf("send register: %w", err)
 		}
@@ -294,6 +304,9 @@ func (c *Client) connect(ctx context.Context) error {
 			continue
 		}
 		tunnelMap[reg.TunnelID] = spec
+		if spec.Proto == proto.ProtoWT && spec.DatagramLocalPort > 0 {
+			dgramRouter.RegisterTunnel(reg.TunnelID, spec.DatagramLocalPort)
+		}
 		switch spec.Proto {
 		case proto.ProtoHTTP, proto.ProtoWT:
 			c.log.Info("tunnel ready",
@@ -319,7 +332,60 @@ func (c *Client) connect(ctx context.Context) error {
 		return fmt.Errorf("no tunnels registered successfully")
 	}
 
+	// Always drain server-originated datagrams on connections that carry any
+	// WebTransport tunnel — the server pushes datagrams regardless of whether
+	// the client has a local UDP forwarder, so an undrained queue would
+	// otherwise grow inside quic-go.
+	if hasWTTunnel(tunnelMap) {
+		c.workers.Go("quic-to-udp", func() {
+			c.dispatchServerDatagrams(ctx, conn, dgramRouter)
+		})
+	}
+
 	return c.acceptDataStreams(ctx, conn, tunnelMap)
+}
+
+// hasWTTunnel reports whether tunnelMap contains at least one WebTransport
+// tunnel. Used to decide whether to drain server-originated QUIC datagrams.
+func hasWTTunnel(tunnels map[uint32]config.TunnelSpec) bool {
+	for _, t := range tunnels {
+		if t.Proto == proto.ProtoWT {
+			return true
+		}
+	}
+	return false
+}
+
+// dispatchServerDatagrams reads QUIC datagrams arriving from the server,
+// parses the [tunnelID:4][sessionID:4] envelope, and routes the payload to
+// the per-session UDP forwarder. When the (tunnelID, sessionID) pair is
+// seen for the first time, a fresh ephemeral UDP socket is allocated so
+// the local service distinguishes visitors by source port. Frames whose
+// tunnel ID is unknown to the router are dropped.
+func (c *Client) dispatchServerDatagrams(ctx context.Context, conn *quic.Conn, router *datagramRouter) {
+	for ctx.Err() == nil {
+		msg, err := conn.ReceiveDatagram(ctx)
+		if err != nil {
+			return
+		}
+		if len(msg) < 8 {
+			continue
+		}
+		tunnelID := binary.BigEndian.Uint32(msg[:4])
+		sessionID := binary.BigEndian.Uint32(msg[4:8])
+		fwd := router.getOrOpen(ctx, conn, tunnelID, sessionID, c.workers)
+		if fwd == nil {
+			continue
+		}
+		fwd.touch()
+		if _, err := fwd.udp.Write(msg[8:]); err != nil {
+			c.log.Debug("write to local UDP",
+				zap.Uint32("tunnel_id", tunnelID),
+				zap.Uint32("session_id", sessionID),
+				zap.Error(err),
+			)
+		}
+	}
 }
 
 // checkInsecureFlags validates the --insecure / --force-insecure combination.

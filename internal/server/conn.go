@@ -9,11 +9,13 @@ import (
 	"os"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/quic-go/quic-go"
 	"go.uber.org/zap"
 
+	"github.com/venkatkrishna07/rift/internal/portblock"
 	"github.com/venkatkrishna07/rift/internal/proto"
 	"github.com/venkatkrishna07/rift/internal/store"
 	"github.com/venkatkrishna07/rift/internal/worker"
@@ -104,30 +106,9 @@ func validateSubdomain(s string) error {
 // clients hoarding resources.
 const controlStreamIdle = 5 * time.Minute
 
-// blockedLocalPorts lists ports that must not be exposed as TCP tunnels even
-// when the client opts in to publishing low ports. Each entry covers a
-// service whose accidental exposure is a known incident class: spam relays,
-// amplification, lateral movement, or trivially brute-forceable databases.
-var blockedLocalPorts = map[uint16]string{
-	22:    "SSH",
-	23:    "Telnet",
-	25:    "SMTP",
-	53:    "DNS",
-	135:   "RPC",
-	139:   "NetBIOS",
-	445:   "SMB",
-	465:   "SMTPS",
-	587:   "SMTP submission",
-	1433:  "MSSQL",
-	1434:  "MSSQL Browser",
-	3306:  "MySQL",
-	3389:  "RDP",
-	5432:  "PostgreSQL",
-	6379:  "Redis",
-	9200:  "Elasticsearch",
-	11211: "memcached",
-	27017: "MongoDB",
-}
+// blockedLocalPorts is the TCP blocklist; sourced from internal/portblock so
+// the policy stays in sync with the WT datagram path.
+var blockedLocalPorts = portblock.TCPServices
 
 // allowLowLocalPorts gates publishing local ports below 1024. The default
 // posture refuses them because a typo turns "expose local dev server" into
@@ -136,6 +117,7 @@ var blockedLocalPorts = map[uint16]string{
 func allowLowLocalPorts() bool {
 	return os.Getenv("RIFT_UNSAFE_TCP_PORT") == "yes"
 }
+
 
 // validateTCPLocalPort returns an error if port is 0, on the blocked list,
 // or below 1024 without the low-port opt-in.
@@ -173,6 +155,21 @@ type connHandler struct {
 	// allowLowPorts mirrors ServerConfig.AllowLowLocalPorts (or the env
 	// override) so validation does not have to reach back into Server.
 	allowLowPorts bool
+
+	// connCtx is the per-connection context populated by the accept loop.
+	// Used to spawn lazy goroutines (e.g. the WT datagram dispatcher) that
+	// must exit when the rift-client connection ends.
+	connCtx context.Context
+
+	// dgramOnce gates the per-conn WT datagram dispatcher; spawned on the
+	// first wt register so HTTP/TCP-only connections never pay the cost.
+	dgramOnce sync.Once
+
+	// peerCaps records capabilities advertised by the rift client during
+	// Hello, so feature paths gated by capability negotiation can ask
+	// "does this peer speak X?" rather than tying everything to a strict
+	// protocol-version bump.
+	peerCaps []string
 }
 
 // doHello performs the Hello exchange. Returns false (and closes the
@@ -207,9 +204,12 @@ func (h *connHandler) doHello(_ context.Context, ctrl *quic.Stream, ip string) b
 		return false
 	}
 	_ = ctrl.SetReadDeadline(time.Time{})
+	// Record the peer's advertised capabilities for downstream gating.
+	h.peerCaps = append([]string(nil), msg.Capabilities...)
 	if err := proto.WriteMsg(ctrl, &proto.ControlMsg{
-		Type:    proto.TypeHelloOK,
-		Version: proto.ProtocolVersion,
+		Type:         proto.TypeHelloOK,
+		Version:      proto.ProtocolVersion,
+		Capabilities: proto.DefaultCapabilities,
 	}); err != nil {
 		h.log.Error("send hello_ok", zap.String("ip", ip), zap.Error(err))
 		_ = h.conn.CloseWithError(2, "protocol error")
@@ -527,7 +527,7 @@ func (h *connHandler) run(ctx context.Context) {
 				_ = proto.WriteMsg(ctrl, &proto.ControlMsg{Type: proto.TypeError, Error: verr.Error()})
 				continue
 			}
-			tun, regErr := h.reg.RegisterWT(subdomain, h.conn, msg.AllowedOrigins)
+			tun, regErr := h.reg.RegisterWT(subdomain, h.conn, msg.AllowedOrigins, msg.AllowedWTProtocols)
 			if regErr != nil {
 				h.log.Warn("WT tunnel registration failed",
 					zap.String("ip", ip),
@@ -546,6 +546,9 @@ func (h *connHandler) run(ctx context.Context) {
 				zap.String("url", url),
 				zap.Uint32("tunnel_id", tun.ID),
 			)
+			// First WT register on this connection spawns the datagram
+			// dispatcher under the server's worker group so Shutdown drains.
+			h.startWTDispatcher()
 			_ = proto.WriteMsg(ctrl, &proto.ControlMsg{
 				Type:     proto.TypeOK,
 				TunnelID: tun.ID,

@@ -60,10 +60,12 @@ See [`examples/client.toml`](examples/client.toml) for a complete example.
 | `client.force-insecure`   | bool     | `false`                  | Allow `insecure` against non-localhost servers |
 | `client.stream-timeout`   | duration | `"5m"`                   | Idle timeout per data stream                   |
 | `client.protocol`         | string   | `"rift"`                 | `"rift"` or `"mcp"`                            |
-| `[[tunnels]].local-port`        | uint16   | _required_         | Local TCP port to forward                                                                                  |
-| `[[tunnels]].proto`             | string   | _required_         | `"http"`, `"tcp"`, `"wt"`, or `"mcp"`                                                                       |
-| `[[tunnels]].name`              | string   | _empty_            | Subdomain (HTTP / WT) or label                                                                              |
-| `[[tunnels]].allowed-origins`   | []string | _empty_            | WT only: per-tunnel cross-origin allow-list; empty rejects every cross-origin request, `"*"` matches any   |
+| `[[tunnels]].local-port`           | uint16   | _required_         | Local TCP port to forward                                                                                  |
+| `[[tunnels]].datagram-local-port`  | uint16   | `0`                | WT only: local UDP port for WebTransport datagrams. `0` disables datagram forwarding for that tunnel       |
+| `[[tunnels]].proto`                | string   | _required_         | `"http"`, `"tcp"`, `"wt"`, or `"mcp"`                                                                       |
+| `[[tunnels]].name`                 | string   | _empty_            | Subdomain (HTTP / WT) or label                                                                              |
+| `[[tunnels]].allowed-origins`      | []string | _empty_            | WT only: per-tunnel cross-origin allow-list; empty rejects every cross-origin request, `"*"` matches any   |
+| `[[tunnels]].allowed-wt-protocols` | []string | _empty_            | WT only: subprotocol allow-list echoed via `WT-Protocol` on Upgrade. Empty accepts any browser-offered protocol |
 
 `[[tunnels]]` blocks are **additive** with `--expose` flags. Tunnels declared in
 the file are registered alongside any tunnels supplied via flags.

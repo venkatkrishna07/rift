@@ -4,6 +4,7 @@ package server
 import (
 	"context"
 	"crypto/tls"
+	"encoding/binary"
 	"fmt"
 	"net"
 	"net/http"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	"github.com/quic-go/quic-go"
+	"github.com/quic-go/webtransport-go"
 	"golang.org/x/time/rate"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
@@ -46,6 +48,7 @@ type Server struct {
 	lifecycleMu     sync.Mutex
 	cancel          context.CancelFunc
 	done            chan struct{}
+	runCtx          context.Context
 	shutdownInvoked bool
 
 	addrMu    sync.RWMutex
@@ -58,6 +61,47 @@ type Server struct {
 
 	wtOnce sync.Once
 	wt     *wtServer
+
+	// wtVisitorsByIP caps concurrent WT sessions per source IP. Mirrors
+	// the per-IP QUIC connection cap, applied at the WT layer where a
+	// single QUIC conn can multiplex many WT sessions.
+	wtVisitorsMu   sync.Mutex
+	wtVisitorsByIP map[string]int
+}
+
+// maxWTSessionsPerIP caps concurrent WebTransport sessions a single source
+// IP may open against this server. Picked to be lenient for legitimate
+// reload-heavy development while bounding a single attacker.
+const maxWTSessionsPerIP = 20
+
+// allowWTVisitor increments the per-IP WT visitor count for ip and reports
+// whether the new total is within the cap. Mirrors allowConn's semantics
+// for ordinary QUIC connections.
+func (s *Server) allowWTVisitor(ip string) bool {
+	s.wtVisitorsMu.Lock()
+	defer s.wtVisitorsMu.Unlock()
+	if s.wtVisitorsByIP == nil {
+		s.wtVisitorsByIP = make(map[string]int)
+	}
+	if s.wtVisitorsByIP[ip] >= maxWTSessionsPerIP {
+		return false
+	}
+	s.wtVisitorsByIP[ip]++
+	return true
+}
+
+// releaseWTVisitor decrements the per-IP WT visitor count and removes the
+// entry when it reaches zero so the map does not grow unbounded.
+func (s *Server) releaseWTVisitor(ip string) {
+	s.wtVisitorsMu.Lock()
+	defer s.wtVisitorsMu.Unlock()
+	if s.wtVisitorsByIP == nil {
+		return
+	}
+	s.wtVisitorsByIP[ip]--
+	if s.wtVisitorsByIP[ip] <= 0 {
+		delete(s.wtVisitorsByIP, ip)
+	}
 }
 
 // New constructs a Server. ts may be nil when cfg.Dev is true.
@@ -83,6 +127,32 @@ func New(cfg config.ServerConfig, ts store.TokenStore, tlsCfg *tls.Config, acmeH
 // fire revoke callbacks for connections currently using a deleted token.
 func (s *Server) Revokes() *RevokeRegistry { return s.revokes }
 
+// startWTDispatcher spawns the per-conn datagram demuxer the first time
+// this rift-client connection registers a WT tunnel. Subsequent calls are
+// no-ops thanks to sync.Once.
+func (h *connHandler) startWTDispatcher() {
+	h.dgramOnce.Do(func() {
+		conn := h.conn
+		ctx := h.connCtx
+		log := h.log
+		reg := h.reg
+		h.workers.Go(fmt.Sprintf("dispatch-dgrams-%s", conn.RemoteAddr()), func() {
+			dispatchClientDatagrams(ctx, conn, reg, log)
+		})
+	})
+}
+
+// runCtxDone returns the channel that fires when Server.Run's supervisor
+// context is cancelled. nil before Run starts and after Run exits.
+func (s *Server) runCtxDone() <-chan struct{} {
+	s.lifecycleMu.Lock()
+	defer s.lifecycleMu.Unlock()
+	if s.runCtx == nil {
+		return nil
+	}
+	return s.runCtx.Done()
+}
+
 // Run starts the QUIC listener and HTTPS server, blocks until ctx is cancelled.
 func (s *Server) Run(ctx context.Context) error {
 	runCtx, cancel := context.WithCancel(ctx)
@@ -92,9 +162,15 @@ func (s *Server) Run(ctx context.Context) error {
 	s.lifecycleMu.Lock()
 	s.cancel = cancel
 	s.done = done
+	s.runCtx = runCtx
 	s.shutdownInvoked = false
 	s.lifecycleMu.Unlock()
-	defer close(done)
+	defer func() {
+		s.lifecycleMu.Lock()
+		s.runCtx = nil
+		s.lifecycleMu.Unlock()
+		close(done)
+	}()
 
 	// QUIC TLS advertises both rift's tunnel protocol and HTTP/3 so a single
 	// UDP socket carries rift clients and WebTransport visitors. The
@@ -304,25 +380,59 @@ func (s *Server) acceptLoop(ctx context.Context, ln *quic.Listener) error {
 			connCtx, connCancel := context.WithCancel(ctx)
 			defer connCancel()
 			context.AfterFunc(conn.Context(), connCancel)
-			// Datagrams are enabled for the WT path but the rift-v1 protocol
-			// does not consume them. Drain unconditionally so an authenticated
-			// client cannot flood unread datagrams into quic-go's per-conn
-			// queue.
-			go drainDatagrams(connCtx, conn)
+			// The WT datagram dispatcher is started lazily on the first
+			// `register wt` from this connection (see conn.go). Skipping the
+			// spawn for non-WT clients avoids an idle goroutine on every
+			// HTTP/TCP-only connection.
+			h.connCtx = connCtx
 			h.run(connCtx)
 		})
 	}
 }
 
 
-// drainDatagrams silently discards QUIC datagrams on a rift-v1 connection so
-// they cannot accumulate in quic-go's per-connection queue. The rift-v1
-// protocol never sends or expects datagrams; we keep them enabled at the
-// transport level only because the WebTransport server requires them.
-func drainDatagrams(ctx context.Context, conn *quic.Conn) {
+// dispatchClientDatagrams reads QUIC datagrams from a rift-client connection
+// and routes each one to the exact WebTransport session whose ID is carried
+// in bytes [4:8] of the wire envelope. The tunnel must be owned by this
+// QUIC connection — cross-connection injection is rejected. Frames too
+// short, with an unknown tunnel, an unknown session, or a non-WT tunnel
+// are dropped silently — quic-go's per-conn queue stays drained either way.
+//
+// Wire format: [tunnelID:4 BE][sessionID:4 BE][payload...].
+func dispatchClientDatagrams(ctx context.Context, conn *quic.Conn, reg *Registry, log *zap.Logger) {
 	for ctx.Err() == nil {
-		if _, err := conn.ReceiveDatagram(ctx); err != nil {
+		msg, err := conn.ReceiveDatagram(ctx)
+		if err != nil {
 			return
+		}
+		if len(msg) < 8 {
+			continue
+		}
+		tunnelID := binary.BigEndian.Uint32(msg[:4])
+		sessionID := binary.BigEndian.Uint32(msg[4:8])
+		payload := msg[8:]
+		tun := reg.ByID(tunnelID)
+		if tun == nil || tun.Proto != "wt" || tun.Conn != conn {
+			// Tunnel-ownership check: only the rift-client that owns the
+			// tunnel may send datagrams targeting it. Closes the cross-
+			// tunnel injection vector.
+			continue
+		}
+		v := tun.GetWTSession(sessionID)
+		if v == nil {
+			continue
+		}
+		sess, ok := v.(*webtransport.Session)
+		if !ok {
+			continue
+		}
+		if err := sess.SendDatagram(payload); err != nil {
+			log.Debug("wt session datagram dropped",
+				zap.Uint32("tunnel_id", tunnelID),
+				zap.Uint32("session_id", sessionID),
+				zap.Int("len", len(payload)),
+				zap.Error(err),
+			)
 		}
 	}
 }

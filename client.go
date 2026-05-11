@@ -3,8 +3,10 @@ package rift
 import (
 	"context"
 	"errors"
+	"fmt"
 
 	"github.com/venkatkrishna07/rift/internal/client"
+	"github.com/venkatkrishna07/rift/internal/portblock"
 )
 
 // Client is a tunnel client. Construct with NewClient; call Connect to dial
@@ -47,6 +49,19 @@ func NewClient(cfg ClientConfig, opts ...ClientOption) (*Client, error) {
 	}
 	if o.logger == nil {
 		o.logger = NopLogger()
+	}
+
+	// Validate per-tunnel datagram targets against the UDP service blocklist.
+	// The check guards a developer running rift client from accidentally
+	// publishing privileged loopback services (mDNS, DNS, NTP, SNMP, …) to
+	// untrusted WebTransport visitors.
+	for i, t := range cfg.Tunnels {
+		if t.Proto != ProtoWT || t.DatagramLocalPort == 0 {
+			continue
+		}
+		if svc, blocked := portblock.UDPServices[t.DatagramLocalPort]; blocked {
+			return nil, fmt.Errorf("rift: tunnels[%d].DatagramLocalPort %d (%s) is on the WT datagram blocklist", i, t.DatagramLocalPort, svc)
+		}
 	}
 
 	inner := client.New(cfg.toInternal(), o.tokenStore, zapFromLogger(o.logger))

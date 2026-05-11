@@ -171,10 +171,12 @@ func (c ClientConfig) toInternal() config.ClientConfig {
 	internal.Tunnels = make([]config.TunnelSpec, len(c.Tunnels))
 	for i, t := range c.Tunnels {
 		internal.Tunnels[i] = config.TunnelSpec{
-			LocalPort:      t.LocalPort,
-			Proto:          t.Proto,
-			Name:           t.Name,
-			AllowedOrigins: append([]string(nil), t.AllowedOrigins...),
+			LocalPort:          t.LocalPort,
+			DatagramLocalPort:  t.DatagramLocalPort,
+			Proto:              t.Proto,
+			Name:               t.Name,
+			AllowedOrigins:     append([]string(nil), t.AllowedOrigins...),
+			AllowedWTProtocols: append([]string(nil), t.AllowedWTProtocols...),
 		}
 	}
 	return internal
@@ -184,6 +186,10 @@ func (c ClientConfig) toInternal() config.ClientConfig {
 type TunnelSpec struct {
 	// LocalPort is the loopback TCP port the client forwards to.
 	LocalPort uint16
+	// DatagramLocalPort is the loopback UDP port the client forwards
+	// WebTransport datagrams to. Only honoured when Proto == ProtoWT;
+	// zero disables datagram forwarding entirely.
+	DatagramLocalPort uint16
 	// Proto is the tunnel transport. Must be ProtoHTTP, ProtoTCP, or ProtoWT;
 	// other values are rejected by the server at registration time.
 	Proto string
@@ -194,4 +200,10 @@ type TunnelSpec struct {
 	// rejects every cross-origin request (only same-origin allowed); "*"
 	// matches any origin. Ignored for non-WT tunnels.
 	AllowedOrigins []string
+	// AllowedWTProtocols enumerates the WebTransport subprotocols the
+	// tunnel is willing to negotiate. Browsers request via
+	// `new WebTransport(url, {protocols: [...]})`; rift echoes the chosen
+	// value via the WT-Protocol response header. Empty accepts whatever
+	// the browser sends (or none). Ignored for non-WT tunnels.
+	AllowedWTProtocols []string
 }

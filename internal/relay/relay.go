@@ -10,8 +10,15 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/quic-go/quic-go"
+	"github.com/quic-go/webtransport-go"
 	"go.uber.org/zap"
 )
+
+// errCodeRelayIdle is the QUIC application error code emitted when the
+// idle watchdog aborts a stream. A non-zero value lets the peer
+// distinguish a relay-side idle abort from a graceful close (code 0).
+const errCodeRelayIdle quic.StreamErrorCode = 1
 
 var bufPool = sync.Pool{
 	New: func() any {
@@ -22,9 +29,11 @@ var bufPool = sync.Pool{
 
 // Relay copies data between a and b concurrently until either side closes.
 //
-// If timeout > 0 an idle watchdog closes both sides when no bytes are
-// transferred for the timeout duration. Both a and b are always closed before
-// Relay returns.
+// If timeout > 0 an idle watchdog aborts both sides when no bytes are
+// transferred for the timeout duration. For QUIC streams the watchdog uses
+// CancelRead+CancelWrite so the peer observes a real stream-reset rather
+// than a silent EOF. For non-QUIC RWCs the watchdog falls back to Close.
+// Both a and b are always closed before Relay returns.
 func Relay(a, b io.ReadWriteCloser, timeout time.Duration, log *zap.Logger) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel() // stops watchdog when relay finishes normally
@@ -49,12 +58,12 @@ func Relay(a, b io.ReadWriteCloser, timeout time.Duration, log *zap.Logger) {
 				case <-ticker.C:
 					idle := time.Since(time.Unix(0, last.Load()))
 					if idle > timeout {
-						log.Debug("relay idle timeout — closing streams",
+						log.Debug("relay idle timeout — aborting streams",
 							zap.Duration("idle", idle),
 							zap.Duration("timeout", timeout),
 						)
-						_ = a.Close()
-						_ = b.Close()
+						abortOrClose(a)
+						abortOrClose(b)
 						return
 					}
 				}
@@ -67,6 +76,22 @@ func Relay(a, b io.ReadWriteCloser, timeout time.Duration, log *zap.Logger) {
 	go func() { defer wg.Done(); copyHalf(ra, rb, log) }()
 	go func() { defer wg.Done(); copyHalf(rb, ra, log) }()
 	wg.Wait()
+}
+
+// abortOrClose cancels a QUIC or WebTransport stream with a non-zero error
+// code so the peer sees a real stream-reset on idle-timeout. For everything
+// else (plain net.Conn, etc.) it falls back to a Close.
+func abortOrClose(rwc io.ReadWriteCloser) {
+	switch s := rwc.(type) {
+	case *quic.Stream:
+		s.CancelRead(errCodeRelayIdle)
+		s.CancelWrite(errCodeRelayIdle)
+	case *webtransport.Stream:
+		s.CancelRead(webtransport.StreamErrorCode(errCodeRelayIdle))
+		s.CancelWrite(webtransport.StreamErrorCode(errCodeRelayIdle))
+	default:
+		_ = rwc.Close()
+	}
 }
 
 // activityRWC wraps an io.ReadWriteCloser and records the nanosecond timestamp

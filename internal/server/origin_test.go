@@ -17,6 +17,11 @@ func TestOriginAllowed(t *testing.T) {
 		{"no match in list", "https://x.com", []string{"https://y.com"}, false},
 		{"port-different is different origin", "https://x.com:8443", []string{"https://x.com"}, false},
 		{"scheme-different is different origin", "http://x.com", []string{"https://x.com"}, false},
+		{"null origin rejected by default", "null", []string{"https://x.com"}, false},
+		{"null origin matches when explicitly allowed", "null", []string{"null"}, true},
+		{"null origin matches wildcard", "null", []string{"*"}, true},
+		{"case sensitivity — origin lowercase required", "HTTPS://X.COM", []string{"https://x.com"}, false},
+		{"trailing slash treated as distinct origin", "https://x.com/", []string{"https://x.com"}, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
