@@ -15,6 +15,8 @@ import (
 
 // Message type constants.
 const (
+	TypeHello    = "hello"
+	TypeHelloOK  = "hello_ok"
 	TypeAuth     = "auth"
 	TypeAuthOK   = "auth_ok"
 	TypeRegister = "register"
@@ -22,10 +24,19 @@ const (
 	TypeError    = "error"
 )
 
+// ProtocolVersion is the rift wire-protocol version this binary speaks. Sent
+// in the Hello frame at the start of every control stream so future clients
+// and servers can negotiate features without bumping the ALPN.
+const ProtocolVersion = 1
+
 // Proto identifies the tunnel protocol.
 const (
 	ProtoHTTP = "http"
 	ProtoTCP  = "tcp"
+	// ProtoWT routes incoming HTTP/3 WebTransport sessions on a subdomain
+	// (same naming model as ProtoHTTP) to a local TCP service on the client.
+	// Each bidi WT stream is spliced 1:1 onto a fresh TCP connection.
+	ProtoWT = "wt"
 )
 
 // ControlMsg is the JSON payload exchanged on the control stream.
@@ -39,15 +50,40 @@ type ControlMsg struct {
 	URL      string `json:"url,omitempty"`
 	Addr     string `json:"addr,omitempty"`
 	Error    string `json:"error,omitempty"`
+	// Version is the protocol version the sender speaks. Populated on Hello.
+	Version int `json:"version,omitempty"`
+	// Capabilities is the optional feature flag set advertised in Hello.
+	// Receivers ignore unknown names — future versions can add capabilities
+	// without breaking older peers.
+	Capabilities []string `json:"capabilities,omitempty"`
+	// AllowedOrigins lists permitted Origin header values for WT tunnels.
+	// Empty means deny all cross-origin requests. Exact-match comparison.
+	// "*" is accepted as an explicit any-origin escape hatch.
+	AllowedOrigins []string `json:"allowed_origins,omitempty"`
 }
 
-// redactToken returns the first 8 characters of token followed by "..." for
+// RedactToken returns the first 8 characters of token followed by "..." for
 // safe use in log output. Returns "***" for tokens of 8 characters or fewer.
-func redactToken(token string) string {
+func RedactToken(token string) string {
 	if len(token) <= 8 {
 		return "***"
 	}
 	return token[:8] + "..."
+}
+
+// String returns a redacted view of the message. Used by %v / %+v in fmt
+// callers so an accidental log of a *ControlMsg never includes the raw token.
+// Wire encoding goes through json.Marshal in WriteMsg and is unaffected.
+func (m *ControlMsg) String() string {
+	if m == nil {
+		return "<nil ControlMsg>"
+	}
+	tok := ""
+	if m.Token != "" {
+		tok = " token=" + RedactToken(m.Token)
+	}
+	return fmt.Sprintf("ControlMsg{type=%s%s port=%d proto=%s name=%s tunnel_id=%d url=%s addr=%s err=%s}",
+		m.Type, tok, m.Port, m.Proto, m.Name, m.TunnelID, m.URL, m.Addr, m.Error)
 }
 
 // MarshalLogObject implements zapcore.ObjectMarshaler.
@@ -57,7 +93,7 @@ func redactToken(token string) string {
 func (m *ControlMsg) MarshalLogObject(enc zapcore.ObjectEncoder) error {
 	enc.AddString("type", m.Type)
 	if m.Token != "" {
-		enc.AddString("token_prefix", redactToken(m.Token))
+		enc.AddString("token_prefix", RedactToken(m.Token))
 	}
 	if m.Port != 0 {
 		enc.AddUint64("port", uint64(m.Port))

@@ -36,7 +36,7 @@ func DevTLSConfig(domain string) (*tls.Config, error) {
 		Subject:      pkix.Name{CommonName: "*." + domain},
 		DNSNames:     []string{domain, "*." + domain},
 		NotBefore:    time.Now().Add(-time.Minute),
-		NotAfter:     time.Now().Add(365 * 24 * time.Hour),
+		NotAfter:     time.Now().Add(30 * 24 * time.Hour),
 		KeyUsage:     x509.KeyUsageDigitalSignature,
 		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
 	}

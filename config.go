@@ -31,6 +31,9 @@ const (
 const (
 	ProtoHTTP = "http"
 	ProtoTCP  = "tcp"
+	// ProtoWT routes browser WebTransport sessions on a subdomain to a local
+	// TCP service. Visitor traffic is HTTP/3 only (UDP/443, ALPN "h3").
+	ProtoWT = "wt"
 )
 
 // ServerConfig configures a rift tunnel server. Zero values for optional
@@ -53,6 +56,9 @@ type ServerConfig struct {
 	TCPPortMax         uint16
 	TokenTTL           time.Duration
 	MaxIncomingStreams int64
+	// MaxVisitorsPerTunnel caps the number of in-flight visitors against a
+	// single tunnel. Zero falls back to a built-in default (currently 50).
+	MaxVisitorsPerTunnel int64
 }
 
 // EffectiveMaxBodyBytes returns MaxBodyBytes when set, else DefaultMaxBodyBytes.
@@ -122,7 +128,8 @@ func (c ServerConfig) toInternal() config.ServerConfig {
 		TCPPortMin:         c.TCPPortMin,
 		TCPPortMax:         c.TCPPortMax,
 		TokenTTL:           c.TokenTTL,
-		MaxIncomingStreams: c.EffectiveMaxIncomingStreams(),
+		MaxIncomingStreams:   c.EffectiveMaxIncomingStreams(),
+		MaxVisitorsPerTunnel: c.MaxVisitorsPerTunnel,
 	}
 }
 
@@ -164,9 +171,10 @@ func (c ClientConfig) toInternal() config.ClientConfig {
 	internal.Tunnels = make([]config.TunnelSpec, len(c.Tunnels))
 	for i, t := range c.Tunnels {
 		internal.Tunnels[i] = config.TunnelSpec{
-			LocalPort: t.LocalPort,
-			Proto:     t.Proto,
-			Name:      t.Name,
+			LocalPort:      t.LocalPort,
+			Proto:          t.Proto,
+			Name:           t.Name,
+			AllowedOrigins: append([]string(nil), t.AllowedOrigins...),
 		}
 	}
 	return internal
@@ -176,10 +184,14 @@ func (c ClientConfig) toInternal() config.ClientConfig {
 type TunnelSpec struct {
 	// LocalPort is the loopback TCP port the client forwards to.
 	LocalPort uint16
-	// Proto is the tunnel transport. Must be ProtoHTTP or ProtoTCP; other
-	// values are rejected by the server at registration time.
+	// Proto is the tunnel transport. Must be ProtoHTTP, ProtoTCP, or ProtoWT;
+	// other values are rejected by the server at registration time.
 	Proto string
-	// Name is an optional subdomain (HTTP) or label (TCP). When empty the
+	// Name is an optional subdomain (HTTP/WT) or label (TCP). When empty the
 	// server allocates one — a random subdomain or a free port.
 	Name string
+	// AllowedOrigins gates cross-origin browser access for WT tunnels. Empty
+	// rejects every cross-origin request (only same-origin allowed); "*"
+	// matches any origin. Ignored for non-WT tunnels.
+	AllowedOrigins []string
 }

@@ -22,8 +22,13 @@ func NewRevokeRegistry() *RevokeRegistry {
 	return &RevokeRegistry{fns: make(map[string]map[uint64]func())}
 }
 
-// Register stores fn under name and returns an unregister func.
+// Register stores fn under name and returns an unregister func. A blank
+// name is rejected with a no-op unregister so a race that loses the name
+// cannot register a callback under an unkillable empty bucket.
 func (r *RevokeRegistry) Register(name string, fn func()) func() {
+	if name == "" {
+		return func() {}
+	}
 	id := r.nextID.Add(1)
 	r.mu.Lock()
 	if r.fns[name] == nil {

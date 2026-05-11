@@ -15,7 +15,7 @@ import (
 func newTestHTTPHandler(t *testing.T, domain string) *httpHandler {
 	t.Helper()
 	return &httpHandler{
-		reg:           NewRegistry(20000, 20100),
+		reg:           NewRegistry(20000, 20100, 0),
 		log:           zap.NewNop(),
 		maxBodyBytes:  1 << 20,
 		streamTimeout: 30 * time.Second,

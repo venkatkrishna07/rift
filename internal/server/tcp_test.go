@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"go.uber.org/zap/zaptest"
+
+	"github.com/venkatkrishna07/rift/internal/worker"
 )
 
 // dialFreePort returns a free TCP port by briefly binding to :0.
@@ -25,7 +27,7 @@ func dialFreePort(t *testing.T) uint16 {
 func TestServeTCPTunnelBindSuccess(t *testing.T) {
 	port := dialFreePort(t)
 
-	reg := NewRegistry(0, 0)
+	reg := NewRegistry(0, 0, 0)
 	tun, err := reg.RegisterTCP(nil)
 	if err != nil {
 		t.Fatalf("RegisterTCP: %v", err)
@@ -40,7 +42,7 @@ func TestServeTCPTunnelBindSuccess(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		serveTCPTunnel(ctx, nil, tun.ID, port, reg, 30*time.Second, bindCh, log)
+		serveTCPTunnel(ctx, nil, tun.ID, port, reg, worker.New(log), 30*time.Second, bindCh, log)
 	}()
 
 	select {
@@ -76,7 +78,7 @@ func TestServeTCPTunnelBindError(t *testing.T) {
 
 	port := uint16(occupied.Addr().(*net.TCPAddr).Port)
 
-	reg := NewRegistry(0, 0)
+	reg := NewRegistry(0, 0, 0)
 	tun, err := reg.RegisterTCP(nil)
 	if err != nil {
 		t.Fatalf("RegisterTCP: %v", err)
@@ -88,7 +90,7 @@ func TestServeTCPTunnelBindError(t *testing.T) {
 
 	log := zaptest.NewLogger(t)
 
-	go serveTCPTunnel(ctx, nil, tun.ID, port, reg, 30*time.Second, bindCh, log)
+	go serveTCPTunnel(ctx, nil, tun.ID, port, reg, worker.New(log), 30*time.Second, bindCh, log)
 
 	select {
 	case err := <-bindCh:

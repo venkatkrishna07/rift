@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -26,18 +27,30 @@ import (
 // Access is restricted to loopback addresses only.
 // Requests are rate-limited to 5 per minute per IP to prevent brute-force.
 type AdminSecretIssuer struct {
-	secret     string
-	ts         store.TokenStore
-	defaultTTL time.Duration // 0 = no expiry
-	log        *zap.Logger
-	rl         *perIPLimiter
-	revokes    *RevokeRegistry // wired by Server.SetTokenIssuer; nil disables DELETE
+	secret            string
+	ts                store.TokenStore
+	defaultTTL        time.Duration // 0 = no expiry
+	log               *zap.Logger
+	rl                *perIPLimiter
+	revokes           *RevokeRegistry // wired by Server.SetTokenIssuer; nil disables DELETE
+	authRL            *rateLimiter    // shared per-IP auth-failure tracker; nil disables IP block
+	trustProxyHeaders bool            // wired by Server.SetTokenIssuer from ServerConfig
 }
 
 // SetRevokes installs the registry used to fire revoke callbacks on
 // DELETE /_admin/tokens/:name. Server.SetTokenIssuer calls this automatically
 // for *AdminSecretIssuer values.
 func (a *AdminSecretIssuer) SetRevokes(r *RevokeRegistry) { a.revokes = r }
+
+// SetAuthRL installs the per-IP auth-failure tracker. Repeated bad bearers
+// now escalate to the same block that QUIC auth failures trigger, so a
+// loopback-spoofing attacker cannot brute-force forever.
+func (a *AdminSecretIssuer) SetAuthRL(rl *rateLimiter) { a.authRL = rl }
+
+// SetTrustProxyHeaders configures whether X-Forwarded-For / X-Real-IP on the
+// admin endpoint is tolerated. Defaults to false; rift terminates TLS itself
+// in the documented deployment shape.
+func (a *AdminSecretIssuer) SetTrustProxyHeaders(trust bool) { a.trustProxyHeaders = trust }
 
 // NewAdminSecretIssuer returns a new AdminSecretIssuer.
 // defaultTTL is applied to every token unless overridden by the ?ttl= query param; 0 = no expiry.
@@ -69,8 +82,29 @@ func (a *AdminSecretIssuer) Match(r *http.Request) bool {
 func (a *AdminSecretIssuer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	ip := clientIP(r.RemoteAddr)
 
+	// Detect that rift is sitting behind an HTTP reverse proxy. The admin
+	// endpoint's loopback check trusts r.RemoteAddr only — a proxy would
+	// hand us 127.0.0.1 for every visitor, opening the endpoint to the
+	// world. Refuse rather than misinterpret X-Forwarded-For. Operators
+	// who genuinely run rift behind a proxy must terminate the admin
+	// listener separately.
+	if !a.trustProxyHeaders && !proxyTrusted() && (r.Header.Get("X-Forwarded-For") != "" || r.Header.Get("X-Real-IP") != "") {
+		a.log.Warn("admin endpoint refused — proxy headers detected",
+			zap.String("ip", ip),
+			zap.String("xff", r.Header.Get("X-Forwarded-For")),
+		)
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+
 	if !isAdminAllowedIP(ip) {
 		a.log.Warn("admin endpoint access denied — IP not allowed", zap.String("ip", ip))
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+
+	if a.authRL != nil && a.authRL.IsBlocked(ip) {
+		a.log.Warn("admin endpoint blocked — IP previously over auth-failure threshold", zap.String("ip", ip))
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
@@ -88,7 +122,14 @@ func (a *AdminSecretIssuer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	bearerHash := sha256.Sum256([]byte(bearer))
 	secretHash := sha256.Sum256([]byte(a.secret))
 	if subtle.ConstantTimeCompare(bearerHash[:], secretHash[:]) != 1 {
-		a.log.Warn("admin endpoint auth failed", zap.String("ip", ip))
+		blocked := false
+		if a.authRL != nil {
+			blocked = a.authRL.RecordFailure(ip)
+		}
+		a.log.Warn("admin endpoint auth failed",
+			zap.String("ip", ip),
+			zap.Bool("now_blocked", blocked),
+		)
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
@@ -193,4 +234,12 @@ func (a *AdminSecretIssuer) handleRevoke(w http.ResponseWriter, r *http.Request)
 func isAdminAllowedIP(ip string) bool {
 	parsed := net.ParseIP(ip)
 	return parsed != nil && parsed.IsLoopback()
+}
+
+// proxyTrusted reports whether the operator has opted in to trusting reverse
+// proxy headers. The default is false; admin endpoint refuses requests
+// carrying X-Forwarded-For so it cannot be fooled into trusting an
+// attacker that reached it through a proxy that terminates TLS upstream.
+func proxyTrusted() bool {
+	return os.Getenv("RIFT_TRUST_PROXY_HEADERS") == "yes"
 }

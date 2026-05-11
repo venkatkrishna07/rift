@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/quic-go/quic-go"
+	"golang.org/x/time/rate"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
 
@@ -52,6 +53,11 @@ type Server struct {
 
 	issuerMu sync.RWMutex
 	issuer   TokenIssuer
+
+	regRL *perIPLimiter // per-token-name registration rate limiter
+
+	wtOnce sync.Once
+	wt     *wtServer
 }
 
 // New constructs a Server. ts may be nil when cfg.Dev is true.
@@ -61,8 +67,9 @@ func New(cfg config.ServerConfig, ts store.TokenStore, tlsCfg *tls.Config, acmeH
 	return &Server{
 		cfg:         cfg,
 		ts:          ts,
-		reg:         NewRegistry(cfg.EffectiveTCPPortMin(), cfg.EffectiveTCPPortMax()),
+		reg:         NewRegistry(cfg.EffectiveTCPPortMin(), cfg.EffectiveTCPPortMax(), cfg.EffectiveMaxVisitorsPerTunnel()),
 		revokes:     NewRevokeRegistry(),
+		regRL:       newPerIPLimiter(rate.Every(12*time.Second), 5, time.Hour),
 		tlsCfg:      tlsCfg,
 		acmeHandler: acmeHandler,
 		log:         l,
@@ -89,9 +96,11 @@ func (s *Server) Run(ctx context.Context) error {
 	s.lifecycleMu.Unlock()
 	defer close(done)
 
-	// QUIC TLS: only the rift ALPN — the HTTPS listener uses a separate clone.
+	// QUIC TLS advertises both rift's tunnel protocol and HTTP/3 so a single
+	// UDP socket carries rift clients and WebTransport visitors. The
+	// negotiated ALPN is inspected after the handshake to dispatch.
 	quicTLS := s.tlsCfg.Clone()
-	quicTLS.NextProtos = []string{"rift-v1"}
+	quicTLS.NextProtos = []string{"rift-v1", "h3"}
 
 	udpAddr, err := net.ResolveUDPAddr("udp", s.cfg.ListenAddr)
 	if err != nil {
@@ -118,10 +127,12 @@ func (s *Server) Run(ctx context.Context) error {
 		VerifySourceAddress:  func(net.Addr) bool { return true },
 	}
 	ln, err := tr.Listen(quicTLS, &quic.Config{
-		MaxIdleTimeout:     30 * time.Second,
-		KeepAlivePeriod:    15 * time.Second,
-		MaxIncomingStreams: s.cfg.MaxIncomingStreams,
-		Allow0RTT:          false,
+		MaxIdleTimeout:                   30 * time.Second,
+		KeepAlivePeriod:                  15 * time.Second,
+		MaxIncomingStreams:               s.cfg.MaxIncomingStreams,
+		Allow0RTT:                        false,
+		EnableDatagrams:                  true,
+		EnableStreamResetPartialDelivery: true,
 	})
 	if err != nil {
 		_ = udpConn.Close()
@@ -216,6 +227,8 @@ func (s *Server) SetTokenIssuer(iss TokenIssuer) {
 	s.issuerMu.Unlock()
 	if a, ok := iss.(*AdminSecretIssuer); ok {
 		a.SetRevokes(s.revokes)
+		a.SetAuthRL(s.rl)
+		a.SetTrustProxyHeaders(s.cfg.TrustProxyHeaders)
 	}
 }
 
@@ -261,12 +274,14 @@ func (s *Server) acceptLoop(ctx context.Context, ln *quic.Listener) error {
 			ts:            s.ts,
 			reg:           s.reg,
 			revokes:       s.revokes,
+			regRL:         s.regRL,
 			dev:           s.cfg.Dev,
 			domain:        s.cfg.Domain,
 			workers:       s.wg,
 			log:           s.log,
 			rl:            s.rl,
 			streamTimeout: s.cfg.EffectiveStreamTimeout(),
+			allowLowPorts: s.cfg.AllowLowLocalPorts,
 		}
 		s.totalConns.Add(1)
 		s.wg.Go(fmt.Sprintf("conn-%s", conn.RemoteAddr()), func() {
@@ -279,14 +294,36 @@ func (s *Server) acceptLoop(ctx context.Context, ln *quic.Listener) error {
 			case <-ctx.Done():
 				return
 			}
-			// Derive a context that cancels when the QUIC connection closes,
-			// so all goroutines spawned for this connection (including TCP tunnels)
-			// exit promptly when the client disconnects.
+			// Dispatch by negotiated ALPN: "rift-v1" is the tunnel protocol;
+			// "h3" hands the connection to the WebTransport server.
+			alpn := conn.ConnectionState().TLS.NegotiatedProtocol
+			if alpn == "h3" {
+				s.serveWebTransport(ctx, conn)
+				return
+			}
 			connCtx, connCancel := context.WithCancel(ctx)
 			defer connCancel()
 			context.AfterFunc(conn.Context(), connCancel)
+			// Datagrams are enabled for the WT path but the rift-v1 protocol
+			// does not consume them. Drain unconditionally so an authenticated
+			// client cannot flood unread datagrams into quic-go's per-conn
+			// queue.
+			go drainDatagrams(connCtx, conn)
 			h.run(connCtx)
 		})
+	}
+}
+
+
+// drainDatagrams silently discards QUIC datagrams on a rift-v1 connection so
+// they cannot accumulate in quic-go's per-connection queue. The rift-v1
+// protocol never sends or expects datagrams; we keep them enabled at the
+// transport level only because the WebTransport server requires them.
+func drainDatagrams(ctx context.Context, conn *quic.Conn) {
+	for ctx.Err() == nil {
+		if _, err := conn.ReceiveDatagram(ctx); err != nil {
+			return
+		}
 	}
 }
 

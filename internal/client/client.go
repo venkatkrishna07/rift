@@ -227,6 +227,27 @@ func (c *Client) connect(ctx context.Context) error {
 		return fmt.Errorf("open control stream: %w", err)
 	}
 
+	// Hello first so the server can reject unknown protocol versions before
+	// any token is sent.
+	if err := proto.WriteMsg(ctrl, &proto.ControlMsg{
+		Type:    proto.TypeHello,
+		Version: proto.ProtocolVersion,
+	}); err != nil {
+		return fmt.Errorf("send hello: %w", err)
+	}
+	helloResp, err := proto.ReadMsg(ctrl)
+	if err != nil {
+		return fmt.Errorf("read hello response: %w", err)
+	}
+	switch helloResp.Type {
+	case proto.TypeHelloOK:
+		// ok
+	case proto.TypeError:
+		return fmt.Errorf("server rejected hello: %s", helloResp.Error)
+	default:
+		return fmt.Errorf("unexpected hello response type %q", helloResp.Type)
+	}
+
 	if err := proto.WriteMsg(ctrl, &proto.ControlMsg{Type: proto.TypeAuth, Token: token}); err != nil {
 		return fmt.Errorf("send auth: %w", err)
 	}
@@ -234,18 +255,24 @@ func (c *Client) connect(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("read auth response: %w", err)
 	}
-	if resp.Type != proto.TypeAuthOK {
+	switch resp.Type {
+	case proto.TypeAuthOK:
+		// ok
+	case proto.TypeError:
 		return fmt.Errorf("%w: %s", server.ErrAuthFailed, resp.Error)
+	default:
+		return fmt.Errorf("%w: unexpected auth response type %q", server.ErrAuthFailed, resp.Type)
 	}
 	c.log.Info("authenticated")
 
 	tunnelMap := make(map[uint32]config.TunnelSpec, len(c.cfg.Tunnels))
 	for _, spec := range c.cfg.Tunnels {
 		if err := proto.WriteMsg(ctrl, &proto.ControlMsg{
-			Type:  proto.TypeRegister,
-			Port:  spec.LocalPort,
-			Proto: spec.Proto,
-			Name:  spec.Name,
+			Type:           proto.TypeRegister,
+			Port:           spec.LocalPort,
+			Proto:          spec.Proto,
+			Name:           spec.Name,
+			AllowedOrigins: spec.AllowedOrigins,
 		}); err != nil {
 			return fmt.Errorf("send register: %w", err)
 		}
@@ -253,13 +280,22 @@ func (c *Client) connect(ctx context.Context) error {
 		if err != nil {
 			return fmt.Errorf("read register response: %w", err)
 		}
-		if reg.Type == proto.TypeError {
+		switch reg.Type {
+		case proto.TypeOK:
+			// proceed
+		case proto.TypeError:
 			c.log.Error("registration rejected", zap.String("err", reg.Error))
+			continue
+		default:
+			c.log.Warn("unexpected register response type",
+				zap.String("type", reg.Type),
+				zap.String("proto", spec.Proto),
+			)
 			continue
 		}
 		tunnelMap[reg.TunnelID] = spec
 		switch spec.Proto {
-		case proto.ProtoHTTP:
+		case proto.ProtoHTTP, proto.ProtoWT:
 			c.log.Info("tunnel ready",
 				zap.String("proto", spec.Proto),
 				zap.String("url", reg.URL),

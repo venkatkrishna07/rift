@@ -55,11 +55,8 @@ func OpenBadger(path string, log *zap.Logger) (*BadgerStore, error) {
 // OpenBadgerReadOnly opens an existing BadgerDB at path in read-only mode.
 // Multiple processes can hold read-only handles simultaneously — no lock conflict.
 // Returns nil without error if the path does not exist yet. The logger is
-// reserved for future use; pass nil for no-op.
-func OpenBadgerReadOnly(path string, log *zap.Logger) (*BadgerStore, error) {
-	if log == nil {
-		log = zap.NewNop()
-	}
+// reserved for future diagnostics; nil is accepted as no-op.
+func OpenBadgerReadOnly(path string, _ *zap.Logger) (*BadgerStore, error) {
 	if _, err := os.Stat(path); os.IsNotExist(err) {
 		return nil, nil
 	}
@@ -218,5 +215,15 @@ func (s *BadgerStore) Delete(_ context.Context, name string) (bool, error) {
 		}
 		return nil
 	})
-	return err == nil, err
+	if err != nil {
+		return false, err
+	}
+	// Force the WAL fsync so a deleted token cannot resurrect after a crash.
+	// Badger's default SyncWrites is false; we accept the throughput cost on
+	// revocation specifically because token expiry leaks have larger blast
+	// radius than a slow Delete.
+	if err := s.db.Sync(); err != nil {
+		return true, fmt.Errorf("sync after delete: %w", err)
+	}
+	return true, nil
 }

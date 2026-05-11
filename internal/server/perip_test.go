@@ -34,7 +34,6 @@ func TestPerIPCounterReleasedOnHandlerError(t *testing.T) {
 	func() {
 		defer s.releaseConn(ip)
 		// simulate a handshake failure path that returns immediately.
-		return
 	}()
 	s.connMu.Lock()
 	defer s.connMu.Unlock()

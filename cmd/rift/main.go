@@ -237,6 +237,8 @@ func runClient(args []string, log *zap.Logger) error {
 		"Max time to wait for graceful client shutdown on SIGTERM (default 10s)")
 	var exposeFlags multiFlag
 	fs.Var(&exposeFlags, "expose", "PORT:PROTO[:NAME], e.g. 3000:http:myapp (repeatable)")
+	var wtOriginFlags multiFlag
+	fs.Var(&wtOriginFlags, "wt-allow-origin", "Origin allow-list applied to every WT tunnel from --expose. Use \"*\" for any origin. Repeatable.")
 	_ = fs.Parse(args)
 	if *forceInsecure && os.Getenv("RIFT_FORCE_INSECURE") != "yes" {
 		return fmt.Errorf(
@@ -250,6 +252,9 @@ func runClient(args []string, log *zap.Logger) error {
 		spec, err := parseTunnelSpec(e)
 		if err != nil {
 			return err
+		}
+		if spec.Proto == rift.ProtoWT && len(wtOriginFlags) > 0 {
+			spec.AllowedOrigins = append([]string(nil), wtOriginFlags...)
 		}
 		specs = append(specs, spec)
 	}
@@ -285,6 +290,9 @@ func runClient(args []string, log *zap.Logger) error {
 				log.Error("close client token store", zap.Error(err))
 			}
 		}()
+		log.Warn("client token cache stores raw tokens in plaintext — restrict directory access",
+			zap.String("path", *dbPath),
+		)
 	}
 
 	if *protocol != rift.ProtocolRift && *protocol != rift.ProtocolMCP {
@@ -433,13 +441,14 @@ func applyClientFile(
 		if t.LocalPort == 0 {
 			return fmt.Errorf("tunnels[%d]: local-port is required", i)
 		}
-		if t.Proto != rift.ProtoHTTP && t.Proto != rift.ProtoTCP && t.Proto != rift.ProtocolMCP {
+		if t.Proto != rift.ProtoHTTP && t.Proto != rift.ProtoTCP && t.Proto != rift.ProtoWT && t.Proto != rift.ProtocolMCP {
 			return fmt.Errorf("tunnels[%d]: unknown proto %q", i, t.Proto)
 		}
 		*specs = append(*specs, rift.TunnelSpec{
-			LocalPort: t.LocalPort,
-			Proto:     t.Proto,
-			Name:      t.Name,
+			LocalPort:      t.LocalPort,
+			Proto:          t.Proto,
+			Name:           t.Name,
+			AllowedOrigins: append([]string(nil), t.AllowedOrigins...),
 		})
 	}
 	return nil
@@ -454,7 +463,7 @@ func parseTunnelSpec(s string) (rift.TunnelSpec, error) {
 	if err != nil || port == 0 {
 		return rift.TunnelSpec{}, fmt.Errorf("invalid port in --expose %q", s)
 	}
-	if parts[1] != rift.ProtoHTTP && parts[1] != rift.ProtoTCP && parts[1] != rift.ProtocolMCP {
+	if parts[1] != rift.ProtoHTTP && parts[1] != rift.ProtoTCP && parts[1] != rift.ProtoWT && parts[1] != rift.ProtocolMCP {
 		return rift.TunnelSpec{}, fmt.Errorf("unknown proto %q in --expose %q", parts[1], s)
 	}
 	var name string
@@ -462,12 +471,6 @@ func parseTunnelSpec(s string) (rift.TunnelSpec, error) {
 		name = parts[2]
 	}
 	return rift.TunnelSpec{LocalPort: uint16(port), Proto: parts[1], Name: name}, nil
-}
-
-func runWithSignal(fn func(context.Context) error) error {
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
-	return fn(ctx)
 }
 
 func runWithGracefulShutdown(

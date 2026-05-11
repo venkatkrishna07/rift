@@ -65,7 +65,10 @@ func NewServer(cfg ServerConfig, opts ...ServerOption) (*Server, error) {
 		o.tlsCfg = tlsCfg
 	}
 
-	inner := server.New(cfg.toInternal(), o.tokenStore, o.tlsCfg, o.acmeHandler, zapFromLogger(o.logger))
+	internalCfg := cfg.toInternal()
+	internalCfg.TrustProxyHeaders = o.trustProxyHeaders
+	internalCfg.AllowLowLocalPorts = o.allowLowLocalPorts
+	inner := server.New(internalCfg, o.tokenStore, o.tlsCfg, o.acmeHandler, zapFromLogger(o.logger))
 	if o.tokenIssuer != nil {
 		inner.SetTokenIssuer(o.tokenIssuer)
 	}

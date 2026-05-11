@@ -48,6 +48,22 @@ type ServerConfig struct {
 	// rift.ServerConfig resolves the default before populating this
 	// field, so the value here is always non-zero.
 	MaxIncomingStreams int64
+	// MaxVisitorsPerTunnel caps in-flight visitors against a single tunnel.
+	// 0 → DefaultMaxVisitorsPerTunnel.
+	MaxVisitorsPerTunnel int64
+	// TrustProxyHeaders allows the admin endpoint to accept requests carrying
+	// X-Forwarded-For / X-Real-IP. Off by default: rift terminates TLS
+	// itself in the documented deployment shape.
+	TrustProxyHeaders bool
+	// AllowLowLocalPorts lets clients publish local services on ports below
+	// 1024. Off by default to avoid a typo exposing a privileged service.
+	AllowLowLocalPorts bool
+}
+
+// EffectiveMaxVisitorsPerTunnel returns the configured per-tunnel visitor cap
+// or 0 (which the registry treats as DefaultMaxVisitorsPerTunnel).
+func (c ServerConfig) EffectiveMaxVisitorsPerTunnel() int64 {
+	return c.MaxVisitorsPerTunnel
 }
 
 // EffectiveMaxBodyBytes returns the configured limit or the package default.
@@ -112,7 +128,8 @@ func (c ClientConfig) EffectiveStreamTimeout() time.Duration {
 
 // TunnelSpec describes a single tunnel the client wants to expose.
 type TunnelSpec struct {
-	LocalPort uint16 // local TCP port to forward to
-	Proto     string // "http" or "tcp"
-	Name      string // optional human name; server picks subdomain/port if empty
+	LocalPort      uint16   // local TCP port to forward to
+	Proto          string   // "http", "tcp", or "wt"
+	Name           string   // optional human name; server picks subdomain/port if empty
+	AllowedOrigins []string // WT only: cross-origin allow-list ("*" = any, empty = same-origin only)
 }

@@ -9,11 +9,13 @@ import (
 type ServerOption func(*serverOptions)
 
 type serverOptions struct {
-	tlsCfg      *tls.Config
-	tokenStore  TokenStore
-	tokenIssuer TokenIssuer
-	acmeHandler http.Handler
-	logger      Logger
+	tlsCfg              *tls.Config
+	tokenStore          TokenStore
+	tokenIssuer         TokenIssuer
+	acmeHandler         http.Handler
+	logger              Logger
+	trustProxyHeaders   bool
+	allowLowLocalPorts  bool
 }
 
 // WithTLSConfig supplies the TLS config used by the QUIC and HTTPS listeners.
@@ -44,6 +46,22 @@ func WithACMEHandler(h http.Handler) ServerOption {
 // WithLogger plugs in the Logger used by the server. Defaults to NopLogger().
 func WithLogger(l Logger) ServerOption {
 	return func(o *serverOptions) { o.logger = l }
+}
+
+// WithTrustProxyHeaders enables trusting `X-Forwarded-For` / `X-Real-IP`
+// headers on the admin endpoint. Off by default: rift's documented
+// deployment shape is to be the public-facing terminator, so seeing those
+// headers means a reverse proxy is in front and the loopback check would
+// silently pass for *every* visitor.
+func WithTrustProxyHeaders(trust bool) ServerOption {
+	return func(o *serverOptions) { o.trustProxyHeaders = trust }
+}
+
+// WithAllowLowLocalPorts allows clients to expose local TCP services on
+// privileged ports (<1024). Off by default to keep a typo from publishing
+// SSH or other admin services to the internet.
+func WithAllowLowLocalPorts(allow bool) ServerOption {
+	return func(o *serverOptions) { o.allowLowLocalPorts = allow }
 }
 
 // ClientOption configures a Client constructed by NewClient.

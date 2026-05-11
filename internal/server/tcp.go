@@ -14,7 +14,7 @@ import (
 	"github.com/venkatkrishna07/rift/internal/worker"
 )
 
-func serveTCPTunnel(ctx context.Context, conn *quic.Conn, id uint32, port uint16, reg *Registry, streamTimeout time.Duration, bindErr chan<- error, log *zap.Logger) {
+func serveTCPTunnel(ctx context.Context, conn *quic.Conn, id uint32, port uint16, reg *Registry, workers *worker.Group, streamTimeout time.Duration, bindErr chan<- error, log *zap.Logger) {
 	log = log.With(zap.Uint32("tunnel_id", id), zap.Uint16("port", port))
 
 	tun := reg.ByID(id)
@@ -36,25 +36,25 @@ func serveTCPTunnel(ctx context.Context, conn *quic.Conn, id uint32, port uint16
 		zap.String("bind", fmt.Sprintf("0.0.0.0:%d", port)),
 	)
 
-	go func() {
+	// Listener close-on-ctx watcher runs on the server-wide group so Shutdown
+	// waits for it. Without this, a bare goroutine here would let Shutdown
+	// claim cleanliness it does not deliver.
+	workers.Go(fmt.Sprintf("tcp-tunnel-watcher-%d", id), func() {
 		<-ctx.Done()
 		_ = ln.Close()
-	}()
+	})
 	defer func() {
 		_ = ln.Close()
 		reg.Unregister(id)
 	}()
 
-	visitors := worker.New(log)
 	for {
 		visitor, err := ln.Accept()
 		if err != nil {
 			if ctx.Err() != nil {
-				visitors.Wait()
 				return
 			}
 			log.Error("TCP accept error", zap.Error(err))
-			visitors.Wait()
 			return
 		}
 		if !tun.TryAddVisitor() {
@@ -62,17 +62,17 @@ func serveTCPTunnel(ctx context.Context, conn *quic.Conn, id uint32, port uint16
 			_ = visitor.Close()
 			continue
 		}
-		visitors.Go(fmt.Sprintf("tcp-visitor-%s", visitor.RemoteAddr()), func() {
+		workers.Go(fmt.Sprintf("tcp-visitor-%s", visitor.RemoteAddr()), func() {
 			forwardTCPVisitor(ctx, visitor, conn, id, tun, streamTimeout, log)
 		})
 	}
 }
 
-func forwardTCPVisitor(ctx context.Context, visitor net.Conn, conn *quic.Conn, tunnelID uint32, tun *Tunnel, streamTimeout time.Duration, log *zap.Logger) {
+func forwardTCPVisitor(ctx context.Context, visitor net.Conn, _ *quic.Conn, tunnelID uint32, tun *Tunnel, streamTimeout time.Duration, log *zap.Logger) {
 	defer visitor.Close()
 	defer tun.VisitorDone()
 
-	stream, err := conn.OpenStreamSync(ctx)
+	stream, err := tun.OpenDataStream(ctx)
 	if err != nil {
 		log.Error("open QUIC stream for TCP visitor", zap.Error(err))
 		return

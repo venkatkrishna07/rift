@@ -52,6 +52,19 @@ func (r *rateLimiter) RecordFailure(ip string) bool {
 	return e.blocked
 }
 
+// Unblock clears any block + failure counter for ip. Returns whether an
+// entry was present. Intended for an operator-driven "unblock by hand"
+// path; the regular auto-eviction in IsBlocked still applies otherwise.
+func (r *rateLimiter) Unblock(ip string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, ok := r.entries[ip]; !ok {
+		return false
+	}
+	delete(r.entries, ip)
+	return true
+}
+
 // IsBlocked reports whether ip is currently rate-limited.
 func (r *rateLimiter) IsBlocked(ip string) bool {
 	r.mu.Lock()
