@@ -16,9 +16,10 @@ const (
 
 // rateLimiter tracks per-IP auth failures and blocks repeat offenders.
 type rateLimiter struct {
-	mu      sync.Mutex
-	entries map[string]*rlEntry
-	done    chan struct{}
+	mu       sync.Mutex
+	entries  map[string]*rlEntry
+	done     chan struct{}
+	stopOnce sync.Once
 }
 
 type rlEntry struct {
@@ -36,8 +37,8 @@ func newRateLimiter() *rateLimiter {
 	return rl
 }
 
-// Stop terminates the background cleanup goroutine.
-func (r *rateLimiter) Stop() { close(r.done) }
+// Stop terminates the background cleanup goroutine. Safe to call multiple times.
+func (r *rateLimiter) Stop() { r.stopOnce.Do(func() { close(r.done) }) }
 
 // RecordFailure records an auth failure for ip and returns true if the IP is now blocked.
 func (r *rateLimiter) RecordFailure(ip string) bool {
@@ -49,6 +50,19 @@ func (r *rateLimiter) RecordFailure(ip string) bool {
 		e.blocked = true
 	}
 	return e.blocked
+}
+
+// Unblock clears any block + failure counter for ip. Returns whether an
+// entry was present. Intended for an operator-driven "unblock by hand"
+// path; the regular auto-eviction in IsBlocked still applies otherwise.
+func (r *rateLimiter) Unblock(ip string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, ok := r.entries[ip]; !ok {
+		return false
+	}
+	delete(r.entries, ip)
+	return true
 }
 
 // IsBlocked reports whether ip is currently rate-limited.

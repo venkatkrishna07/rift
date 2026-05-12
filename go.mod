@@ -1,6 +1,6 @@
 module github.com/venkatkrishna07/rift
 
-go 1.25.1
+go 1.25.10
 
 require (
 	github.com/BurntSushi/toml v1.6.0
@@ -23,6 +23,7 @@ require (
 	github.com/charmbracelet/x/cellbuf v0.0.13-0.20250311204145-2c3ea96c31dd // indirect
 	github.com/charmbracelet/x/term v0.2.1 // indirect
 	github.com/dgraph-io/ristretto/v2 v2.4.0 // indirect
+	github.com/dunglas/httpsfv v1.1.0 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/go-logr/logr v1.4.3 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect
@@ -32,6 +33,8 @@ require (
 	github.com/mattn/go-isatty v0.0.20 // indirect
 	github.com/mattn/go-runewidth v0.0.16 // indirect
 	github.com/muesli/termenv v0.16.0 // indirect
+	github.com/quic-go/qpack v0.6.0 // indirect
+	github.com/quic-go/webtransport-go v0.10.0 // indirect
 	github.com/rivo/uniseg v0.4.7 // indirect
 	github.com/xo/terminfo v0.0.0-20220910002029-abceb7e1c41e // indirect
 	go.opentelemetry.io/auto/sdk v1.2.1 // indirect

@@ -8,8 +8,8 @@ import (
 
 // These variables are overridden at link time:
 //
-//	go build -ldflags "-X github.com/venkatkrishna07/rift/internal/version.Version=v1.0.0 \
-//	                   -X github.com/venkatkrishna07/rift/internal/version.Date=2026-04-15"
+//	go build -ldflags "-X github.com/venkatkrishna07/rift/cmd/rift/internal/version.Version=v1.0.0 \
+//	                   -X github.com/venkatkrishna07/rift/cmd/rift/internal/version.Date=2026-04-15"
 var (
 	Version = "dev"
 	Date    = "unknown"

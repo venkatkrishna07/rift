@@ -13,9 +13,9 @@ import (
 // Group manages a collection of named goroutines.
 // Zero value is not usable — create via New.
 type Group struct {
-	wg    sync.WaitGroup
-	count atomic.Int64
-	log   *zap.Logger
+	wg     sync.WaitGroup
+	log    *zap.Logger
+	active atomic.Int64
 }
 
 // New returns a ready-to-use Group that logs panics with log.
@@ -27,20 +27,22 @@ func New(log *zap.Logger) *Group {
 // Panics inside fn are caught, logged, and do not propagate.
 func (g *Group) Go(name string, fn func()) {
 	g.wg.Add(1)
-	g.count.Add(1)
+	g.active.Add(1)
 	go func() {
 		defer g.wg.Done()
-		defer g.count.Add(-1)
+		defer g.active.Add(-1)
 		defer g.recoverPanic(name)
 		fn()
 	}()
 }
 
-// Count returns the number of currently running goroutines.
-func (g *Group) Count() int64 { return g.count.Load() }
-
 // Wait blocks until all goroutines started by Go have returned.
 func (g *Group) Wait() { g.wg.Wait() }
+
+// Active returns the number of goroutines started by Go that have not yet
+// returned. Suitable for observability — e.g. a periodic gauge — but not as
+// a synchronisation primitive.
+func (g *Group) Active() int64 { return g.active.Load() }
 
 func (g *Group) recoverPanic(name string) {
 	r := recover()

@@ -12,16 +12,26 @@ func TestValidateTCPLocalPort(t *testing.T) {
 	}{
 		{port: 3000, wantErr: false},
 		{port: 8080, wantErr: false},
-		{port: 5432, wantErr: false},
-		{port: 22,   wantErr: false}, // SSH allowed
+		{port: 22,   wantErr: true},  // SSH blocked
+		{port: 23,   wantErr: true},  // Telnet blocked
 		{port: 25,   wantErr: true},  // SMTP blocked
 		{port: 53,   wantErr: true},  // DNS blocked
 		{port: 465,  wantErr: true},  // SMTPS blocked
 		{port: 587,  wantErr: true},  // SMTP submission blocked
+		{port: 1433, wantErr: true},  // MSSQL blocked
+		{port: 3306, wantErr: true},  // MySQL blocked
+		{port: 5432, wantErr: true},  // PostgreSQL blocked
+		{port: 6379, wantErr: true},  // Redis blocked
+		{port: 9200, wantErr: true},  // Elasticsearch blocked
+		{port: 11211, wantErr: true}, // memcached blocked
+		{port: 27017, wantErr: true}, // MongoDB blocked
 		{port: 0,    wantErr: true},  // port 0 invalid
+		{port: 80,   wantErr: true},  // privileged port blocked without override
+		{port: 1024, wantErr: false}, // first unprivileged port allowed
 	}
 	for _, tc := range cases {
-		err := validateTCPLocalPort(tc.port)
+		h := &connHandler{}
+		err := h.validateTCPLocalPort(tc.port)
 		if (err != nil) != tc.wantErr {
 			t.Errorf("validateTCPLocalPort(%d) error = %v, wantErr %v", tc.port, err, tc.wantErr)
 		}

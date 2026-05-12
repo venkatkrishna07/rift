@@ -12,7 +12,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/quic-go/quic-go"
 	"go.uber.org/zap"
 
 	"github.com/venkatkrishna07/rift/internal/proto"
@@ -58,9 +57,11 @@ func (s *Server) serveHTTPS(ctx context.Context, tlsCfg *tls.Config) error {
 	vrl := newPerIPLimiter(100, 200, 10*time.Minute)
 	vrl.start(ctx)
 
-	var issuer TokenIssuer
-	if s.cfg.AdminSecret != "" && s.ts != nil {
-		issuer = NewAdminSecretIssuer(s.cfg.AdminSecret, s.ts, s.cfg.TokenTTL, s.log)
+	issuer := s.tokenIssuer()
+
+	domain := strings.ToLower(s.cfg.Domain)
+	if domain == "" {
+		s.log.Warn("HTTPS host pin disabled — ServerConfig.Domain is empty; any Host header will be accepted")
 	}
 
 	srv := &http.Server{
@@ -71,6 +72,7 @@ func (s *Server) serveHTTPS(ctx context.Context, tlsCfg *tls.Config) error {
 			streamTimeout: s.cfg.EffectiveStreamTimeout(),
 			visitorRL:     vrl,
 			issuer:        issuer,
+			domain:        domain,
 		},
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       120 * time.Second,
@@ -96,9 +98,26 @@ type httpHandler struct {
 	streamTimeout time.Duration
 	visitorRL     *perIPLimiter
 	issuer        TokenIssuer // nil = no token provisioning endpoint
+	domain        string      // lowercased configured base domain; empty = host pin disabled
 }
 
 func (h *httpHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	host := r.Host
+	if i := strings.IndexByte(host, ':'); i != -1 {
+		host = host[:i]
+	}
+	host = strings.ToLower(host)
+
+	// Host pin: refuse requests whose Host does not belong to the configured
+	// domain. Blocks host-header smuggling via multi-SAN certs or upstream
+	// proxies that forward arbitrary Host values to this listener. Empty
+	// h.domain disables the check (e.g. when the handler is mounted on a
+	// caller-provided mux that handles host pinning itself).
+	if h.domain != "" && host != h.domain && !strings.HasSuffix(host, "."+h.domain) {
+		http.Error(w, "misdirected request", http.StatusMisdirectedRequest)
+		return
+	}
+
 	if h.issuer != nil && h.issuer.Match(r) {
 		h.issuer.ServeHTTP(w, r)
 		return
@@ -111,10 +130,6 @@ func (h *httpHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	host := r.Host
-	if i := strings.IndexByte(host, ':'); i != -1 {
-		host = host[:i]
-	}
 	subdomain := strings.SplitN(host, ".", 2)[0]
 	tun := h.reg.BySubdomain(subdomain)
 	if tun == nil {
@@ -161,21 +176,39 @@ func (h *httpHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			req.Header.Set("X-Forwarded-Host", r.Host)
 		},
 		ModifyResponse: func(resp *http.Response) error {
-			resp.Body = io.NopCloser(io.LimitReader(resp.Body, h.maxBodyBytes))
+			resp.Body = newLimitedBody(resp.Body, h.maxBodyBytes)
 			return nil
 		},
-		Transport: &tunnelTransport{conn: tun.Conn, tunnelID: tun.ID},
+		Transport: &tunnelTransport{tun: tun},
 	}
 	rp.ServeHTTP(w, r)
 }
 
+// limitedBody is an io.ReadCloser that caps reads at limit bytes while still
+// closing the original body. The naive `io.NopCloser(io.LimitReader(body))`
+// wrapper used to live here, but NopCloser dropped the close-side of the
+// upstream body — leaking the underlying QUIC stream after every response.
+type limitedBody struct {
+	limited io.Reader
+	closer  io.Closer
+}
+
+func newLimitedBody(rc io.ReadCloser, limit int64) *limitedBody {
+	return &limitedBody{
+		limited: io.LimitReader(rc, limit),
+		closer:  rc,
+	}
+}
+
+func (b *limitedBody) Read(p []byte) (int, error) { return b.limited.Read(p) }
+func (b *limitedBody) Close() error               { return b.closer.Close() }
+
 type tunnelTransport struct {
-	conn     *quic.Conn
-	tunnelID uint32
+	tun *Tunnel
 }
 
 func (t *tunnelTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	stream, err := t.conn.OpenStreamSync(req.Context())
+	stream, err := t.tun.OpenDataStream(req.Context())
 	if err != nil {
 		return nil, fmt.Errorf("open QUIC stream: %w", err)
 	}
@@ -184,7 +217,7 @@ func (t *tunnelTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 		stream.Close()
 		return nil, fmt.Errorf("set stream deadline: %w", err)
 	}
-	if err := proto.WriteHeader(stream, proto.TunnelHeader{TunnelID: t.tunnelID}); err != nil {
+	if err := proto.WriteHeader(stream, proto.TunnelHeader{TunnelID: t.tun.ID}); err != nil {
 		stream.Close()
 		return nil, fmt.Errorf("write header: %w", err)
 	}
@@ -239,7 +272,7 @@ func (r *readerWriteCloser) Close() error { return r.WriteCloser.Close() }
 
 func (h *httpHandler) proxyWebSocket(w http.ResponseWriter, r *http.Request, tun *Tunnel) {
 	// 1. Open stream and write tunnel header with a short I/O deadline.
-	stream, err := tun.Conn.OpenStreamSync(r.Context())
+	stream, err := tun.OpenDataStream(r.Context())
 	if err != nil {
 		h.log.Error("open QUIC stream for websocket", zap.Error(err))
 		http.Error(w, "bad gateway", http.StatusBadGateway)

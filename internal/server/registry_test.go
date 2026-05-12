@@ -6,7 +6,7 @@ import (
 )
 
 func TestRegisterHTTPCollision(t *testing.T) {
-	r := NewRegistry(0, 0)
+	r := NewRegistry(0, 0, 0)
 
 	tun, err := r.RegisterHTTP("myapp", nil)
 	if err != nil {
@@ -23,7 +23,7 @@ func TestRegisterHTTPCollision(t *testing.T) {
 }
 
 func TestRegisterHTTPDifferentSubdomains(t *testing.T) {
-	r := NewRegistry(0, 0)
+	r := NewRegistry(0, 0, 0)
 	if _, err := r.RegisterHTTP("app1", nil); err != nil {
 		t.Fatalf("first registration: %v", err)
 	}
@@ -33,7 +33,7 @@ func TestRegisterHTTPDifferentSubdomains(t *testing.T) {
 }
 
 func TestUnregisterFreesSubdomain(t *testing.T) {
-	r := NewRegistry(0, 0)
+	r := NewRegistry(0, 0, 0)
 	tun, err := r.RegisterHTTP("myapp", nil)
 	if err != nil {
 		t.Fatalf("registration: %v", err)
@@ -46,7 +46,7 @@ func TestUnregisterFreesSubdomain(t *testing.T) {
 }
 
 func TestNextIDNonZeroAndUnique(t *testing.T) {
-	r := NewRegistry(0, 0)
+	r := NewRegistry(0, 0, 0)
 	seen := make(map[uint32]struct{}, 1000)
 	r.mu.Lock()
 	defer r.mu.Unlock()

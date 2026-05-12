@@ -22,6 +22,12 @@ type TokenStore interface {
 	Save(ctx context.Context, key, token string) error
 	// TokenExpiry returns when the token expires; zero time means no expiry.
 	TokenExpiry(ctx context.Context, token string) (time.Time, error)
+	// OwnerOf returns the name associated with token. ok is false when the
+	// token does not exist; err is non-nil only on storage failure.
+	OwnerOf(ctx context.Context, token string) (name string, ok bool, err error)
+	// Delete removes every server-side token whose name equals name.
+	// deleted reports whether at least one entry was removed.
+	Delete(ctx context.Context, name string) (deleted bool, err error)
 	// Close flushes and releases resources.
 	Close() error
 }

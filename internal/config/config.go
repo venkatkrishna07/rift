@@ -43,8 +43,27 @@ type ServerConfig struct {
 	MaxTotalConns int           // max concurrent connections server-wide; 0 → DefaultMaxTotalConns
 	TCPPortMin    uint16        // lower bound of TCP tunnel port range; 0 → DefaultTCPPortMin
 	TCPPortMax    uint16        // upper bound of TCP tunnel port range; 0 → DefaultTCPPortMax
-	AdminSecret   string        // bearer secret for /_admin/tokens; empty = endpoint disabled
 	TokenTTL      time.Duration // default token lifetime; 0 = no expiry
+	// MaxIncomingStreams caps QUIC streams per connection. The public
+	// rift.ServerConfig resolves the default before populating this
+	// field, so the value here is always non-zero.
+	MaxIncomingStreams int64
+	// MaxVisitorsPerTunnel caps in-flight visitors against a single tunnel.
+	// 0 → DefaultMaxVisitorsPerTunnel.
+	MaxVisitorsPerTunnel int64
+	// TrustProxyHeaders allows the admin endpoint to accept requests carrying
+	// X-Forwarded-For / X-Real-IP. Off by default: rift terminates TLS
+	// itself in the documented deployment shape.
+	TrustProxyHeaders bool
+	// AllowLowLocalPorts lets clients publish local services on ports below
+	// 1024. Off by default to avoid a typo exposing a privileged service.
+	AllowLowLocalPorts bool
+}
+
+// EffectiveMaxVisitorsPerTunnel returns the configured per-tunnel visitor cap
+// or 0 (which the registry treats as DefaultMaxVisitorsPerTunnel).
+func (c ServerConfig) EffectiveMaxVisitorsPerTunnel() int64 {
+	return c.MaxVisitorsPerTunnel
 }
 
 // EffectiveMaxBodyBytes returns the configured limit or the package default.
@@ -109,7 +128,10 @@ func (c ClientConfig) EffectiveStreamTimeout() time.Duration {
 
 // TunnelSpec describes a single tunnel the client wants to expose.
 type TunnelSpec struct {
-	LocalPort uint16 // local TCP port to forward to
-	Proto     string // "http" or "tcp"
-	Name      string // optional human name; server picks subdomain/port if empty
+	LocalPort           uint16   // local TCP port to forward to
+	DatagramLocalPort   uint16   // WT only: local UDP port for WT datagrams; 0 disables datagrams
+	Proto               string   // "http", "tcp", or "wt"
+	Name                string   // optional human name; server picks subdomain/port if empty
+	AllowedOrigins      []string // WT only: cross-origin allow-list ("*" = any, empty = same-origin only)
+	AllowedWTProtocols  []string // WT only: subprotocol allow-list echoed via WT-Protocol; empty = accept any
 }

@@ -16,13 +16,10 @@ import (
 
 	"go.uber.org/zap"
 
-	"github.com/venkatkrishna07/rift/internal/client"
-	"github.com/venkatkrishna07/rift/internal/config"
-	"github.com/venkatkrishna07/rift/internal/proto"
-	"github.com/venkatkrishna07/rift/internal/server"
-	"github.com/venkatkrishna07/rift/internal/store"
-	"github.com/venkatkrishna07/rift/internal/ui"
-	"github.com/venkatkrishna07/rift/internal/version"
+	"github.com/venkatkrishna07/rift"
+	"github.com/venkatkrishna07/rift/cmd/rift/internal/cliconfig"
+	"github.com/venkatkrishna07/rift/cmd/rift/internal/ui"
+	"github.com/venkatkrishna07/rift/cmd/rift/internal/version"
 )
 
 func main() {
@@ -59,32 +56,34 @@ func main() {
 func runServer(args []string, log *zap.Logger) error {
 	fs := flag.NewFlagSet("server", flag.ExitOnError)
 	configPath := fs.String("config", "", "Path to TOML config file (or $RIFT_CONFIG)")
-	domain  := fs.String("domain", "tunnel.localhost", "Base domain for HTTP tunnels")
-	listen  := fs.String("listen", ":443", "Listen address (QUIC=UDP, HTTPS=TCP share this port)")
+	domain := fs.String("domain", "tunnel.localhost", "Base domain for HTTP tunnels")
+	listen := fs.String("listen", ":443", "Listen address (QUIC=UDP, HTTPS=TCP share this port)")
 	httpAddr := fs.String("http", ":80", "HTTP listen address for ACME HTTP-01 challenges (prod only)")
-	dev     := fs.Bool("dev", false, "Dev mode: self-signed cert, no token auth")
-	certF   := fs.String("cert", "", "TLS cert PEM (pre-provisioned wildcard cert)")
-	keyF    := fs.String("key", "", "TLS key PEM (required with --cert)")
-	dbPath        := fs.String("db", "/var/lib/rift/db", "BadgerDB data directory")
-	addTok        := fs.String("add-token", "", "Provision a token for NAME, print it, and exit")
-	maxBodyBytes  := fs.Int64("max-body-bytes", config.DefaultMaxBodyBytes,
+	dev := fs.Bool("dev", false, "Dev mode: self-signed cert, no token auth")
+	certF := fs.String("cert", "", "TLS cert PEM (pre-provisioned wildcard cert)")
+	keyF := fs.String("key", "", "TLS key PEM (required with --cert)")
+	dbPath := fs.String("db", "/var/lib/rift/db", "BadgerDB data directory")
+	addTok := fs.String("add-token", "", "Provision a token for NAME, print it, and exit")
+	maxBodyBytes := fs.Int64("max-body-bytes", rift.DefaultMaxBodyBytes,
 		"Max HTTP request/response body size in bytes (default 100 MiB)")
-	streamTimeout := fs.Duration("stream-timeout", config.DefaultStreamTimeout,
+	streamTimeout := fs.Duration("stream-timeout", rift.DefaultStreamTimeout,
 		"Data stream idle timeout; stream closed after this much inactivity (default 5m)")
-	maxConns      := fs.Int("max-conns", config.DefaultMaxTotalConns,
+	maxConns := fs.Int("max-conns", rift.DefaultMaxTotalConns,
 		"Max total concurrent QUIC connections server-wide (default 500)")
-	tcpPortMin := fs.Uint("tcp-port-min", uint(config.DefaultTCPPortMin),
+	tcpPortMin := fs.Uint("tcp-port-min", uint(rift.DefaultTCPPortMin),
 		"Lower bound of TCP tunnel port range (default 10000)")
-	tcpPortMax := fs.Uint("tcp-port-max", uint(config.DefaultTCPPortMax),
+	tcpPortMax := fs.Uint("tcp-port-max", uint(rift.DefaultTCPPortMax),
 		"Upper bound of TCP tunnel port range (default 65535)")
 	adminSecret := fs.String("admin-secret", "",
 		"Bearer secret for /_admin/tokens endpoint (or $RIFT_ADMIN_SECRET)")
-	tokenTTL := fs.Duration("token-ttl", config.DefaultTokenTTL,
+	tokenTTL := fs.Duration("token-ttl", rift.DefaultTokenTTL,
 		"Default token lifetime (default 1h; 0 = no expiry)")
+	shutdownTimeout := fs.Duration("shutdown-timeout", 10*time.Second,
+		"Max time to wait for in-flight tunnels to drain on SIGTERM (default 10s)")
 	_ = fs.Parse(args)
 
 	setFlags := flagsExplicitlySet(fs)
-	file, err := config.LoadServerFile(config.ResolveConfigPath(*configPath))
+	file, err := cliconfig.LoadServerFile(cliconfig.ResolveConfigPath(*configPath))
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)
 	}
@@ -109,7 +108,7 @@ func runServer(args []string, log *zap.Logger) error {
 		log = devLog
 	}
 
-	ts, err := store.OpenBadger(*dbPath)
+	ts, err := rift.OpenBadgerStore(*dbPath, zapRiftLogger{log: log})
 	if err != nil {
 		return fmt.Errorf("open token store: %w", err)
 	}
@@ -120,7 +119,7 @@ func runServer(args []string, log *zap.Logger) error {
 	}()
 
 	if *addTok != "" {
-		tok, err := store.GenerateToken()
+		tok, err := rift.GenerateToken()
 		if err != nil {
 			return err
 		}
@@ -137,7 +136,7 @@ func runServer(args []string, log *zap.Logger) error {
 	)
 	switch {
 	case *dev:
-		tlsCfg, err = server.DevTLSConfig(*domain)
+		tlsCfg, err = rift.DevTLSConfig(*domain)
 		if err != nil {
 			return fmt.Errorf("dev TLS: %w", err)
 		}
@@ -148,14 +147,14 @@ func runServer(args []string, log *zap.Logger) error {
 			return fmt.Errorf("load cert/key: %w", err)
 		}
 		tlsCfg = &tls.Config{
-				Certificates: []tls.Certificate{cert},
-				MinVersion:   tls.VersionTLS13,
-			}
+			Certificates: []tls.Certificate{cert},
+			MinVersion:   tls.VersionTLS13,
+		}
 	default:
-		tlsCfg, acmeHandler = server.ProdTLSConfig(*domain, filepath.Join(*dbPath, "certs"))
+		tlsCfg, acmeHandler = rift.ProdTLSConfig(*domain, filepath.Join(*dbPath, "certs"), zapRiftLogger{log: log})
 	}
 
-	cfg := config.ServerConfig{
+	cfg := rift.ServerConfig{
 		ListenAddr:    *listen,
 		ACMEAddr:      *httpAddr,
 		Domain:        *domain,
@@ -165,12 +164,27 @@ func runServer(args []string, log *zap.Logger) error {
 		MaxTotalConns: *maxConns,
 		TCPPortMin:    uint16(*tcpPortMin),
 		TCPPortMax:    uint16(*tcpPortMax),
-		AdminSecret:   *adminSecret,
 		TokenTTL:      *tokenTTL,
 	}
-	var authStore store.TokenStore
+	riftLogger := zapRiftLogger{log: log}
+	opts := []rift.ServerOption{
+		rift.WithTLSConfig(tlsCfg),
+		rift.WithLogger(riftLogger),
+	}
+	if acmeHandler != nil {
+		opts = append(opts, rift.WithACMEHandler(acmeHandler))
+	}
 	if !*dev {
-		authStore = ts
+		opts = append(opts, rift.WithTokenStore(ts))
+	}
+	if *adminSecret != "" {
+		ttl := *tokenTTL
+		iss := rift.NewAdminSecretIssuer(*adminSecret, ts, ttl, riftLogger)
+		opts = append(opts, rift.WithTokenIssuer(iss))
+	}
+	srv, err := rift.NewServer(cfg, opts...)
+	if err != nil {
+		return fmt.Errorf("construct server: %w", err)
 	}
 
 	ui.PrintServer(os.Stderr, ui.ServerBanner{
@@ -182,7 +196,7 @@ func runServer(args []string, log *zap.Logger) error {
 		Mode:     describeMode(*dev),
 	})
 
-	return runWithSignal(server.New(cfg, authStore, tlsCfg, acmeHandler, log).Run)
+	return runWithGracefulShutdown(srv.Run, srv.Shutdown, *shutdownTimeout)
 }
 
 func describeTLS(dev bool, certPath string) string {
@@ -211,29 +225,51 @@ func (m *multiFlag) Set(v string) error { *m = append(*m, v); return nil }
 func runClient(args []string, log *zap.Logger) error {
 	fs := flag.NewFlagSet("client", flag.ExitOnError)
 	configPath := fs.String("config", "", "Path to TOML config file (or $RIFT_CONFIG)")
-	srvAddr  := fs.String("server", "", "rift server host or host:port (required)")
-	insecure      := fs.Bool("insecure",       false, "Skip TLS cert verification (dev mode)")
+	srvAddr := fs.String("server", "", "rift server host or host:port (required)")
+	insecure := fs.Bool("insecure", false, "Skip TLS cert verification (dev mode)")
 	forceInsecure := fs.Bool("force-insecure", false, "Allow --insecure with non-localhost servers")
-	tokenArg      := fs.String("token",        "",    "Auth token (overrides DB lookup)")
-	dbPath   := fs.String("db", defaultClientDB(log), "BadgerDB data directory")
-	protocol      := fs.String("protocol",       "rift", "Wire protocol: rift or mcp")
-	clientStreamTimeout := fs.Duration("stream-timeout", config.DefaultStreamTimeout,
+	tokenArg := fs.String("token", "", "Auth token (overrides DB lookup)")
+	dbPath := fs.String("db", defaultClientDB(log), "BadgerDB data directory")
+	protocol := fs.String("protocol", "rift", "Wire protocol: rift or mcp")
+	clientStreamTimeout := fs.Duration("stream-timeout", rift.DefaultStreamTimeout,
 		"Data stream idle timeout; stream closed after this much inactivity (default 5m)")
+	clientShutdownTimeout := fs.Duration("shutdown-timeout", 10*time.Second,
+		"Max time to wait for graceful client shutdown on SIGTERM (default 10s)")
 	var exposeFlags multiFlag
 	fs.Var(&exposeFlags, "expose", "PORT:PROTO[:NAME], e.g. 3000:http:myapp (repeatable)")
+	var wtOriginFlags multiFlag
+	fs.Var(&wtOriginFlags, "wt-allow-origin", "Origin allow-list applied to every WT tunnel from --expose. Use \"*\" for any origin. Repeatable.")
+	wtDatagramPort := fs.Uint("wt-datagram-port", 0, "Local UDP port for WT datagrams (applied to every WT tunnel from --expose; 0 disables datagrams).")
+	var wtProtoFlags multiFlag
+	fs.Var(&wtProtoFlags, "wt-protocol", "Allowed WebTransport subprotocol name (applied to every WT tunnel from --expose). Repeatable.")
 	_ = fs.Parse(args)
+	if *forceInsecure && os.Getenv("RIFT_FORCE_INSECURE") != "yes" {
+		return fmt.Errorf(
+			"--force-insecure requires the environment variable RIFT_FORCE_INSECURE=yes " +
+				"to prevent accidental TLS verification bypass on production servers",
+		)
+	}
 
-	specs := make([]config.TunnelSpec, 0, len(exposeFlags))
+	specs := make([]rift.TunnelSpec, 0, len(exposeFlags))
 	for _, e := range exposeFlags {
 		spec, err := parseTunnelSpec(e)
 		if err != nil {
 			return err
 		}
+		if spec.Proto == rift.ProtoWT && len(wtOriginFlags) > 0 {
+			spec.AllowedOrigins = append([]string(nil), wtOriginFlags...)
+		}
+		if spec.Proto == rift.ProtoWT && *wtDatagramPort > 0 {
+			spec.DatagramLocalPort = uint16(*wtDatagramPort)
+		}
+		if spec.Proto == rift.ProtoWT && len(wtProtoFlags) > 0 {
+			spec.AllowedWTProtocols = append([]string(nil), wtProtoFlags...)
+		}
 		specs = append(specs, spec)
 	}
 
 	setFlags := flagsExplicitlySet(fs)
-	file, err := config.LoadClientFile(config.ResolveConfigPath(*configPath))
+	file, err := cliconfig.LoadClientFile(cliconfig.ResolveConfigPath(*configPath))
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)
 	}
@@ -253,8 +289,8 @@ func runClient(args []string, log *zap.Logger) error {
 
 	// Open read-only — multiple clients can run simultaneously without lock conflicts.
 	// Returns nil (no error) if the DB doesn't exist yet; --token flag is required in that case.
-	var ts store.TokenStore
-	if bs, err := store.OpenBadgerReadOnly(*dbPath); err != nil {
+	var ts rift.TokenStore
+	if bs, err := rift.OpenBadgerReadOnlyStore(*dbPath, zapRiftLogger{log: log}); err != nil {
 		log.Warn("could not open token store, proceeding without saved token", zap.Error(err))
 	} else if bs != nil {
 		ts = bs
@@ -263,20 +299,24 @@ func runClient(args []string, log *zap.Logger) error {
 				log.Error("close client token store", zap.Error(err))
 			}
 		}()
+		log.Warn("client token cache stores raw tokens in plaintext — restrict directory access",
+			zap.String("path", *dbPath),
+		)
 	}
 
-	if *protocol != config.ProtocolRift && *protocol != config.ProtocolMCP {
+	if *protocol != rift.ProtocolRift && *protocol != rift.ProtocolMCP {
 		return fmt.Errorf("--protocol must be 'rift' or 'mcp', got %q", *protocol)
 	}
 
-	cfg := config.ClientConfig{
-		Server:        *srvAddr,
-		Token:         *tokenArg,
-		Tunnels:       specs,
-		Insecure:      *insecure,
-		ForceInsecure: *forceInsecure,
-		StreamTimeout: *clientStreamTimeout,
-		Protocol:      *protocol,
+	cfg := rift.ClientConfig{
+		Server:              *srvAddr,
+		Token:               *tokenArg,
+		Tunnels:             specs,
+		Insecure:            *insecure,
+		AcknowledgeInsecure: *forceInsecure,
+		DBPath:              *dbPath,
+		StreamTimeout:       *clientStreamTimeout,
+		Protocol:            *protocol,
 	}
 
 	ui.PrintClient(os.Stderr, ui.ClientBanner{
@@ -286,8 +326,21 @@ func runClient(args []string, log *zap.Logger) error {
 		NumTunnels: len(specs),
 	})
 
-	c := client.New(cfg, ts, log)
-	return runWithSignal(c.Connect)
+	clientOpts := []rift.ClientOption{
+		rift.WithClientLogger(zapRiftLogger{log: log}),
+	}
+	if ts != nil {
+		clientOpts = append(clientOpts, rift.WithClientTokenStore(ts))
+	}
+	c, err := rift.NewClient(cfg, clientOpts...)
+	if err != nil {
+		return fmt.Errorf("construct client: %w", err)
+	}
+	return runWithGracefulShutdown(
+		c.Connect,
+		func(context.Context) error { return c.Close() },
+		*clientShutdownTimeout,
+	)
 }
 
 func flagsExplicitlySet(fs *flag.FlagSet) map[string]bool {
@@ -297,7 +350,7 @@ func flagsExplicitlySet(fs *flag.FlagSet) map[string]bool {
 }
 
 func applyServerFile(
-	file *config.FileServer,
+	file *cliconfig.FileServer,
 	set map[string]bool,
 	domain, listen, httpAddr, certF, keyF, dbPath *string,
 	maxBodyBytes *int64,
@@ -336,14 +389,14 @@ func applyServerFile(
 		*adminSecret = s.AdminSecret
 	}
 	if !set["stream-timeout"] && s.StreamTimeout != "" {
-		d, err := config.ParseDurationStr(s.StreamTimeout)
+		d, err := cliconfig.ParseDurationStr(s.StreamTimeout)
 		if err != nil {
 			return fmt.Errorf("server.stream-timeout: %w", err)
 		}
 		*streamTimeout = d
 	}
 	if !set["token-ttl"] && s.TokenTTL != "" {
-		d, err := config.ParseDurationStr(s.TokenTTL)
+		d, err := cliconfig.ParseDurationStr(s.TokenTTL)
 		if err != nil {
 			return fmt.Errorf("server.token-ttl: %w", err)
 		}
@@ -359,13 +412,13 @@ func applyServerFile(
 }
 
 func applyClientFile(
-	file *config.FileClient,
+	file *cliconfig.FileClient,
 	set map[string]bool,
 	srvAddr, tokenArg, dbPath *string,
 	insecure, forceInsecure *bool,
 	clientStreamTimeout *time.Duration,
 	protocol *string,
-	specs *[]config.TunnelSpec,
+	specs *[]rift.TunnelSpec,
 ) error {
 	c := file.Client
 	if !set["server"] && c.Server != "" {
@@ -375,7 +428,7 @@ func applyClientFile(
 		*tokenArg = c.Token
 	}
 	if !set["db"] && c.DB != "" {
-		*dbPath = config.ExpandHome(c.DB)
+		*dbPath = cliconfig.ExpandHome(c.DB)
 	}
 	if !set["insecure"] && c.Insecure != nil {
 		*insecure = *c.Insecure
@@ -387,7 +440,7 @@ func applyClientFile(
 		*protocol = c.Protocol
 	}
 	if !set["stream-timeout"] && c.StreamTimeout != "" {
-		d, err := config.ParseDurationStr(c.StreamTimeout)
+		d, err := cliconfig.ParseDurationStr(c.StreamTimeout)
 		if err != nil {
 			return fmt.Errorf("client.stream-timeout: %w", err)
 		}
@@ -397,41 +450,71 @@ func applyClientFile(
 		if t.LocalPort == 0 {
 			return fmt.Errorf("tunnels[%d]: local-port is required", i)
 		}
-		if t.Proto != proto.ProtoHTTP && t.Proto != proto.ProtoTCP && t.Proto != config.ProtocolMCP {
+		if t.Proto != rift.ProtoHTTP && t.Proto != rift.ProtoTCP && t.Proto != rift.ProtoWT && t.Proto != rift.ProtocolMCP {
 			return fmt.Errorf("tunnels[%d]: unknown proto %q", i, t.Proto)
 		}
-		*specs = append(*specs, config.TunnelSpec{
-			LocalPort: t.LocalPort,
-			Proto:     t.Proto,
-			Name:      t.Name,
+		*specs = append(*specs, rift.TunnelSpec{
+			LocalPort:          t.LocalPort,
+			DatagramLocalPort:  t.DatagramLocalPort,
+			Proto:              t.Proto,
+			Name:               t.Name,
+			AllowedOrigins:     append([]string(nil), t.AllowedOrigins...),
+			AllowedWTProtocols: append([]string(nil), t.AllowedWTProtocols...),
 		})
 	}
 	return nil
 }
 
-func parseTunnelSpec(s string) (config.TunnelSpec, error) {
+func parseTunnelSpec(s string) (rift.TunnelSpec, error) {
 	parts := strings.SplitN(s, ":", 3)
 	if len(parts) < 2 {
-		return config.TunnelSpec{}, fmt.Errorf("invalid --expose %q: want PORT:PROTO[:NAME]", s)
+		return rift.TunnelSpec{}, fmt.Errorf("invalid --expose %q: want PORT:PROTO[:NAME]", s)
 	}
 	port, err := strconv.ParseUint(parts[0], 10, 16)
 	if err != nil || port == 0 {
-		return config.TunnelSpec{}, fmt.Errorf("invalid port in --expose %q", s)
+		return rift.TunnelSpec{}, fmt.Errorf("invalid port in --expose %q", s)
 	}
-	if parts[1] != proto.ProtoHTTP && parts[1] != proto.ProtoTCP && parts[1] != config.ProtocolMCP {
-		return config.TunnelSpec{}, fmt.Errorf("unknown proto %q in --expose %q", parts[1], s)
+	if parts[1] != rift.ProtoHTTP && parts[1] != rift.ProtoTCP && parts[1] != rift.ProtoWT && parts[1] != rift.ProtocolMCP {
+		return rift.TunnelSpec{}, fmt.Errorf("unknown proto %q in --expose %q", parts[1], s)
 	}
 	var name string
 	if len(parts) == 3 {
 		name = parts[2]
 	}
-	return config.TunnelSpec{LocalPort: uint16(port), Proto: parts[1], Name: name}, nil
+	return rift.TunnelSpec{LocalPort: uint16(port), Proto: parts[1], Name: name}, nil
 }
 
-func runWithSignal(fn func(context.Context) error) error {
+func runWithGracefulShutdown(
+	runFn func(context.Context) error,
+	shutdownFn func(context.Context) error,
+	timeout time.Duration,
+) error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
-	return fn(ctx)
+	return runWithGracefulShutdownCtx(ctx, runFn, shutdownFn, timeout)
+}
+
+func runWithGracefulShutdownCtx(
+	ctx context.Context,
+	runFn func(context.Context) error,
+	shutdownFn func(context.Context) error,
+	timeout time.Duration,
+) error {
+	runErr := make(chan error, 1)
+	go func() { runErr <- runFn(ctx) }()
+
+	select {
+	case err := <-runErr:
+		return err
+	case <-ctx.Done():
+	}
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	if err := shutdownFn(shutdownCtx); err != nil {
+		return fmt.Errorf("graceful shutdown: %w", err)
+	}
+	return <-runErr
 }
 
 func defaultClientDB(log *zap.Logger) string {
@@ -480,3 +563,13 @@ Examples:
   rift client --server tunnel.example.com --expose 3000:http:myapp --expose 5432:tcp
 `)
 }
+
+// zapRiftLogger adapts *zap.Logger to rift.Logger so the CLI can pass its
+// existing zap logger through rift options without forcing zap into the
+// public API.
+type zapRiftLogger struct{ log *zap.Logger }
+
+func (z zapRiftLogger) Debug(msg string, kv ...any) { z.log.Sugar().Debugw(msg, kv...) }
+func (z zapRiftLogger) Info(msg string, kv ...any)  { z.log.Sugar().Infow(msg, kv...) }
+func (z zapRiftLogger) Warn(msg string, kv ...any)  { z.log.Sugar().Warnw(msg, kv...) }
+func (z zapRiftLogger) Error(msg string, kv ...any) { z.log.Sugar().Errorw(msg, kv...) }

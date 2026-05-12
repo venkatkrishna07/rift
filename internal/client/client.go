@@ -4,11 +4,12 @@ package client
 import (
 	"context"
 	"crypto/tls"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"net"
-	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/quic-go/quic-go"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/venkatkrishna07/rift/internal/config"
 	"github.com/venkatkrishna07/rift/internal/proto"
+	"github.com/venkatkrishna07/rift/internal/server"
 	"github.com/venkatkrishna07/rift/internal/store"
 	"github.com/venkatkrishna07/rift/internal/worker"
 )
@@ -26,6 +28,11 @@ type Client struct {
 	ts      store.TokenStore
 	log     *zap.Logger
 	workers *worker.Group
+
+	lifecycleMu sync.Mutex
+	cancel      context.CancelFunc
+	done        chan struct{}
+	closeOnce   sync.Once
 }
 
 // New creates a Client.
@@ -34,10 +41,71 @@ func New(cfg config.ClientConfig, ts store.TokenStore, log *zap.Logger) *Client 
 	return &Client{cfg: cfg, ts: ts, log: l, workers: worker.New(l)}
 }
 
+// Close cancels an in-flight Connect and waits for it to return. Idempotent;
+// subsequent calls return nil without blocking. Safe to call before Connect.
+func (c *Client) Close() error {
+	var done chan struct{}
+	var cancel context.CancelFunc
+	c.closeOnce.Do(func() {
+		c.lifecycleMu.Lock()
+		cancel = c.cancel
+		done = c.done
+		c.lifecycleMu.Unlock()
+		if cancel != nil {
+			cancel()
+		}
+	})
+	if done == nil {
+		return nil
+	}
+	select {
+	case <-done:
+		return nil
+	case <-time.After(5 * time.Second):
+		return fmt.Errorf("client close timed out after 5s")
+	}
+}
+
 // Connect dials the server and reconnects with exponential backoff until ctx is done.
 // Returns a non-nil error only for permanent server errors (auth failure, rate limit,
-// token expired) that retrying will not fix. Returns nil on clean shutdown via ctx.
+// token expired) that retrying will not fix, or the parent ctx error
+// (context.Canceled / context.DeadlineExceeded) when the parent ctx caused
+// the exit. Returns nil only when Close was the cause of exit.
+//
+// When the parent ctx expires while the most recent dial attempt failed
+// (typically TLS verification or a refused connection), the returned error
+// joins the parent ctx error with the last connection error so callers can
+// inspect both via errors.Is.
 func (c *Client) Connect(ctx context.Context) error {
+	parentCtx := ctx
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	done := make(chan struct{})
+	c.lifecycleMu.Lock()
+	c.cancel = cancel
+	c.done = done
+	c.lifecycleMu.Unlock()
+	defer close(done)
+
+	var lastConnErr error
+
+	// exitErr surfaces the parent ctx error when it caused the exit, joined
+	// with the last connection error if one was captured (so TLS / refused
+	// failures are observable rather than masked by ctx.Err()).
+	exitErr := func() error {
+		pe := parentCtx.Err()
+		if pe == nil {
+			return nil
+		}
+		if lastConnErr != nil {
+			return errors.Join(pe, lastConnErr)
+		}
+		return pe
+	}
+
+	ctx = runCtx
+
 	const maxBackoff = 30 * time.Second
 	backoff := time.Second
 	for {
@@ -46,13 +114,14 @@ func (c *Client) Connect(ctx context.Context) error {
 			if isPermanentError(err) {
 				c.log.Error("fatal server error — not retrying", zap.Error(err))
 				c.workers.Wait()
-				return err
+				return wrapPermanent(err)
 			}
+			lastConnErr = err
 			c.log.Error("disconnected", zap.Error(err), zap.Duration("retry_in", backoff))
 			select {
 			case <-ctx.Done():
 				c.workers.Wait()
-				return nil
+				return exitErr()
 			case <-time.After(backoff):
 			}
 			backoff = min(backoff*2, maxBackoff)
@@ -60,7 +129,7 @@ func (c *Client) Connect(ctx context.Context) error {
 		}
 		if ctx.Err() != nil {
 			c.workers.Wait()
-			return nil
+			return exitErr()
 		}
 		backoff = time.Second // reset on clean disconnect
 	}
@@ -71,12 +140,36 @@ func (c *Client) Connect(ctx context.Context) error {
 //
 //	2 — auth failed or rate limited (IP blocked due to repeated failures)
 //	3 — token expired
+//	4 — token revoked
+//
+// Also returns true for ErrMCPNotCompiled — the binary lacks MCP support and
+// retrying will not fix the missing dependency.
 func isPermanentError(err error) bool {
 	var appErr *quic.ApplicationError
 	if errors.As(err, &appErr) {
-		return appErr.ErrorCode == 2 || appErr.ErrorCode == 3
+		return appErr.ErrorCode == 2 || appErr.ErrorCode == 3 || appErr.ErrorCode == 4
 	}
-	return false
+	return errors.Is(err, ErrMCPNotCompiled)
+}
+
+// wrapPermanent maps a permanent-failure error to the public sentinel that
+// the rift package exposes. Auth/IP-block path uses code 2 and surfaces as
+// ErrAuthFailed; token-expiry uses code 3 and surfaces as ErrTokenExpired;
+// token-revoked uses code 4 and surfaces as ErrTokenRevoked. Other errors
+// (e.g. ErrMCPNotCompiled) pass through unchanged.
+func wrapPermanent(err error) error {
+	var appErr *quic.ApplicationError
+	if errors.As(err, &appErr) {
+		switch appErr.ErrorCode {
+		case 2:
+			return fmt.Errorf("%w: %w", server.ErrAuthFailed, err)
+		case 3:
+			return fmt.Errorf("%w: %w", server.ErrTokenExpired, err)
+		case 4:
+			return fmt.Errorf("%w: %w", server.ErrTokenRevoked, err)
+		}
+	}
+	return err
 }
 
 func (c *Client) connect(ctx context.Context) error {
@@ -115,6 +208,10 @@ func (c *Client) connect(ctx context.Context) error {
 		MaxIdleTimeout:  30 * time.Second,
 		KeepAlivePeriod: 15 * time.Second,
 		Allow0RTT:       false, // server rejects 0-RTT; auth is always sent after 1-RTT handshake
+		// Datagrams carry WebTransport datagram payloads — they share the
+		// rift-v1 control connection prefixed with a 4-byte tunnel ID.
+		// Both sides must enable them at handshake time.
+		EnableDatagrams: true,
 	})
 	if err != nil {
 		return fmt.Errorf("dial %s: %w", addr, err)
@@ -135,6 +232,29 @@ func (c *Client) connect(ctx context.Context) error {
 		return fmt.Errorf("open control stream: %w", err)
 	}
 
+	// Hello first so the server can reject unknown protocol versions before
+	// any token is sent. Advertise our capability set so the server can
+	// gate optional features (e.g. v2 WT datagram envelope).
+	if err := proto.WriteMsg(ctrl, &proto.ControlMsg{
+		Type:         proto.TypeHello,
+		Version:      proto.ProtocolVersion,
+		Capabilities: proto.DefaultCapabilities,
+	}); err != nil {
+		return fmt.Errorf("send hello: %w", err)
+	}
+	helloResp, err := proto.ReadMsg(ctrl)
+	if err != nil {
+		return fmt.Errorf("read hello response: %w", err)
+	}
+	switch helloResp.Type {
+	case proto.TypeHelloOK:
+		// ok
+	case proto.TypeError:
+		return fmt.Errorf("server rejected hello: %s", helloResp.Error)
+	default:
+		return fmt.Errorf("unexpected hello response type %q", helloResp.Type)
+	}
+
 	if err := proto.WriteMsg(ctrl, &proto.ControlMsg{Type: proto.TypeAuth, Token: token}); err != nil {
 		return fmt.Errorf("send auth: %w", err)
 	}
@@ -142,18 +262,27 @@ func (c *Client) connect(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("read auth response: %w", err)
 	}
-	if resp.Type != proto.TypeAuthOK {
-		return fmt.Errorf("auth rejected: %s", resp.Error)
+	switch resp.Type {
+	case proto.TypeAuthOK:
+		// ok
+	case proto.TypeError:
+		return fmt.Errorf("%w: %s", server.ErrAuthFailed, resp.Error)
+	default:
+		return fmt.Errorf("%w: unexpected auth response type %q", server.ErrAuthFailed, resp.Type)
 	}
 	c.log.Info("authenticated")
 
 	tunnelMap := make(map[uint32]config.TunnelSpec, len(c.cfg.Tunnels))
+	dgramRouter := newDatagramRouter(c.log)
+	defer dgramRouter.Close()
 	for _, spec := range c.cfg.Tunnels {
 		if err := proto.WriteMsg(ctrl, &proto.ControlMsg{
-			Type:  proto.TypeRegister,
-			Port:  spec.LocalPort,
-			Proto: spec.Proto,
-			Name:  spec.Name,
+			Type:               proto.TypeRegister,
+			Port:               spec.LocalPort,
+			Proto:              spec.Proto,
+			Name:               spec.Name,
+			AllowedOrigins:     spec.AllowedOrigins,
+			AllowedWTProtocols: spec.AllowedWTProtocols,
 		}); err != nil {
 			return fmt.Errorf("send register: %w", err)
 		}
@@ -161,13 +290,25 @@ func (c *Client) connect(ctx context.Context) error {
 		if err != nil {
 			return fmt.Errorf("read register response: %w", err)
 		}
-		if reg.Type == proto.TypeError {
+		switch reg.Type {
+		case proto.TypeOK:
+			// proceed
+		case proto.TypeError:
 			c.log.Error("registration rejected", zap.String("err", reg.Error))
+			continue
+		default:
+			c.log.Warn("unexpected register response type",
+				zap.String("type", reg.Type),
+				zap.String("proto", spec.Proto),
+			)
 			continue
 		}
 		tunnelMap[reg.TunnelID] = spec
+		if spec.Proto == proto.ProtoWT && spec.DatagramLocalPort > 0 {
+			dgramRouter.RegisterTunnel(reg.TunnelID, spec.DatagramLocalPort)
+		}
 		switch spec.Proto {
-		case proto.ProtoHTTP:
+		case proto.ProtoHTTP, proto.ProtoWT:
 			c.log.Info("tunnel ready",
 				zap.String("proto", spec.Proto),
 				zap.String("url", reg.URL),
@@ -191,28 +332,76 @@ func (c *Client) connect(ctx context.Context) error {
 		return fmt.Errorf("no tunnels registered successfully")
 	}
 
+	// Always drain server-originated datagrams on connections that carry any
+	// WebTransport tunnel — the server pushes datagrams regardless of whether
+	// the client has a local UDP forwarder, so an undrained queue would
+	// otherwise grow inside quic-go.
+	if hasWTTunnel(tunnelMap) {
+		c.workers.Go("quic-to-udp", func() {
+			c.dispatchServerDatagrams(ctx, conn, dgramRouter)
+		})
+	}
+
 	return c.acceptDataStreams(ctx, conn, tunnelMap)
 }
 
+// hasWTTunnel reports whether tunnelMap contains at least one WebTransport
+// tunnel. Used to decide whether to drain server-originated QUIC datagrams.
+func hasWTTunnel(tunnels map[uint32]config.TunnelSpec) bool {
+	for _, t := range tunnels {
+		if t.Proto == proto.ProtoWT {
+			return true
+		}
+	}
+	return false
+}
+
+// dispatchServerDatagrams reads QUIC datagrams arriving from the server,
+// parses the [tunnelID:4][sessionID:4] envelope, and routes the payload to
+// the per-session UDP forwarder. When the (tunnelID, sessionID) pair is
+// seen for the first time, a fresh ephemeral UDP socket is allocated so
+// the local service distinguishes visitors by source port. Frames whose
+// tunnel ID is unknown to the router are dropped.
+func (c *Client) dispatchServerDatagrams(ctx context.Context, conn *quic.Conn, router *datagramRouter) {
+	for ctx.Err() == nil {
+		msg, err := conn.ReceiveDatagram(ctx)
+		if err != nil {
+			return
+		}
+		if len(msg) < 8 {
+			continue
+		}
+		tunnelID := binary.BigEndian.Uint32(msg[:4])
+		sessionID := binary.BigEndian.Uint32(msg[4:8])
+		fwd := router.getOrOpen(ctx, conn, tunnelID, sessionID, c.workers)
+		if fwd == nil {
+			continue
+		}
+		fwd.touch()
+		if _, err := fwd.udp.Write(msg[8:]); err != nil {
+			c.log.Debug("write to local UDP",
+				zap.Uint32("tunnel_id", tunnelID),
+				zap.Uint32("session_id", sessionID),
+				zap.Error(err),
+			)
+		}
+	}
+}
+
 // checkInsecureFlags validates the --insecure / --force-insecure combination.
-// Separating this logic makes it testable without a real QUIC connection.
+// Callers (the CLI) are responsible for any environment-variable double-check
+// before setting forceInsecure; the library never reads process env.
 func checkInsecureFlags(insecure, forceInsecure bool, host string) error {
 	if !insecure {
 		return nil
 	}
 	if forceInsecure {
-		if os.Getenv("RIFT_FORCE_INSECURE") != "yes" {
-			return fmt.Errorf(
-				"--force-insecure requires the environment variable RIFT_FORCE_INSECURE=yes " +
-					"to prevent accidental TLS verification bypass on production servers",
-			)
-		}
 		return nil
 	}
 	if !isLocalhost(host) {
 		return fmt.Errorf(
-			"--insecure is only allowed with localhost targets; "+
-				"use --force-insecure (and set RIFT_FORCE_INSECURE=yes) for %q",
+			"insecure mode is only allowed with localhost targets; "+
+				"set AcknowledgeInsecure to bypass cert verification for %q",
 			host,
 		)
 	}

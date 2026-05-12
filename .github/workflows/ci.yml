@@ -27,3 +27,39 @@ jobs:
 
       - name: Build
         run: go build ./cmd/rift/
+
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install staticcheck
+        run: go install honnef.co/go/tools/cmd/staticcheck@latest
+
+      - name: Run staticcheck
+        run: staticcheck ./...
+
+  vuln:
+    name: Vulnerability scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install govulncheck
+        run: go install golang.org/x/vuln/cmd/govulncheck@latest
+
+      - name: Run govulncheck
+        run: govulncheck ./...

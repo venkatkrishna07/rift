@@ -1,0 +1,34 @@
+services:
+  # Public rift server. Bind your wildcard DNS (*.${RIFT_DOMAIN}) at this host
+  # before bringing it up so Let's Encrypt issuance succeeds.
+  rift:
+    image: ghcr.io/venkatkrishna07/rift:latest
+    # Or build locally:
+    # build:
+    #   context: .
+    #   args:
+    #     VERSION: dev
+    container_name: rift
+    restart: unless-stopped
+    command:
+      - server
+      - --domain=${RIFT_DOMAIN:-tunnel.example.com}
+      - --listen=:443
+      - --http=:80
+      - --db=/data/db
+      - --admin-secret=${RIFT_ADMIN_SECRET}
+      - --tcp-port-min=${RIFT_TCP_MIN:-10000}
+      - --tcp-port-max=${RIFT_TCP_MAX:-10010}
+    ports:
+      - "443:443/udp"   # QUIC
+      - "443:443/tcp"   # HTTPS
+      - "80:80/tcp"     # ACME HTTP-01
+      # TCP tunnels — keep in sync with --tcp-port-min / --tcp-port-max above.
+      - "10000-10010:10000-10010/tcp"
+    volumes:
+      - rift-data:/data   # /data/db persists Badger + /data/db/certs for ACME
+    environment:
+      - RIFT_ADMIN_SECRET
+
+volumes:
+  rift-data:

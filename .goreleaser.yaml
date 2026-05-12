@@ -22,8 +22,8 @@ builds:
       - arm64
     ldflags:
       - -s -w
-      - -X github.com/venkatkrishna07/rift/internal/version.Version={{ .Version }}
-      - -X github.com/venkatkrishna07/rift/internal/version.Date={{ .Date }}
+      - -X github.com/venkatkrishna07/rift/cmd/rift/internal/version.Version={{ .Version }}
+      - -X github.com/venkatkrishna07/rift/cmd/rift/internal/version.Date={{ .Date }}
 
 archives:
   - id: rift
@@ -37,6 +37,21 @@ archives:
 
 checksum:
   name_template: "checksums.txt"
+
+signs:
+  - id: cosign-checksums
+    cmd: cosign
+    signature: "${artifact}.sig"
+    certificate: "${artifact}.pem"
+    args:
+      - "sign-blob"
+      - "--oidc-issuer=https://token.actions.githubusercontent.com"
+      - "--output-signature=${signature}"
+      - "--output-certificate=${certificate}"
+      - "--yes"
+      - "${artifact}"
+    artifacts: checksum
+    output: true
 
 changelog:
   sort: asc
