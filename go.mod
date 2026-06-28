@@ -2,6 +2,8 @@ module github.com/venkatkrishna07/rift
 
 go 1.25.10
 
+toolchain go1.26.4
+
 require (
 	github.com/BurntSushi/toml v1.6.0
 	github.com/charmbracelet/lipgloss v1.1.0
