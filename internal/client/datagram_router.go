@@ -165,22 +165,21 @@ func (r *datagramRouter) getOrOpen(ctx context.Context, conn *quic.Conn, tunnelI
 // fails to accept a datagram.
 func (r *datagramRouter) udpToQUIC(ctx context.Context, conn *quic.Conn, f *dgramForwarder) {
 	defer r.closeSession(f)
-	buf := make([]byte, 1500)
+	// Reused across reads: SendDatagram copies the slice before queueing.
+	frame := make([]byte, 8+1500)
+	binary.BigEndian.PutUint32(frame[:4], f.tunnelID)
+	binary.BigEndian.PutUint32(frame[4:8], f.sessionID)
 	for ctx.Err() == nil {
-		n, err := f.udp.Read(buf)
+		n, err := f.udp.Read(frame[8:])
 		if err != nil {
 			return
 		}
 		f.touch()
-		frame := make([]byte, 8+n)
-		binary.BigEndian.PutUint32(frame[:4], f.tunnelID)
-		binary.BigEndian.PutUint32(frame[4:8], f.sessionID)
-		copy(frame[8:], buf[:n])
-		if err := conn.SendDatagram(frame); err != nil {
+		if err := conn.SendDatagram(frame[:8+n]); err != nil {
 			r.log.Debug("send datagram",
 				zap.Uint32("tunnel_id", f.tunnelID),
 				zap.Uint32("session_id", f.sessionID),
-				zap.Int("len", len(frame)),
+				zap.Int("len", 8+n),
 				zap.Error(err),
 			)
 			return
